@@ -1,0 +1,22 @@
+# ── Python ──
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+
+# ── Modelos/pesos pesados (no versionar binarios grandes) ──
+*.pt
+*.onnx
+*.weights
+
+# ── Entorno/secretos ──
+.env
+.env.local
+
+# ── OS ──
+.DS_Store
+Thumbs.db
+
+# ── IDE ──
+.vscode/
