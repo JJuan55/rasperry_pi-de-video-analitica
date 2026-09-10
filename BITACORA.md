@@ -177,3 +177,67 @@ reales de fps/latencia observados; cerrar el catálogo definitivo de gestos con 
   iniciar una sesión CVA, para que los frames reales lleguen al bridge y se pueda medir
   fps/latencia reales — eso queda pendiente de que el usuario lo haga y reporte el
   resultado, o de revisar directamente `/tmp/cva_bridge_fase7.log` una vez ocurra.
+
+---
+
+### Nota operativa — limpieza de proceso duplicado (2026-09-10)
+
+**No es parte del desarrollo de Fase 7** — es la tarea operativa descrita en
+`DIAGNOSTICO_SERVICIO.md` (llegó al repo vía un commit externo, `fc79f60`, jalado con
+`git pull` antes de esta sesión de trabajo). No se tocó ninguna línea de
+`cva_gesture_bridge/*.py`.
+
+**Hallazgo — de dónde venía el conflicto de puerto:**
+
+El bridge manual que se dejó corriendo desde esta misma sesión para el checkpoint de
+Fase 7 (`nohup .venv/bin/python -m cva_gesture_bridge.main`, PID `313645`, log en
+`/tmp/cva_bridge_fase7.log`, fuera del repo) seguía vivo ocupando el puerto 8766 cuando
+en algún punto posterior se creó y arrancó `cva-gesture-bridge.service` vía `systemd`.
+El journal del servicio (`journalctl -u cva-gesture-bridge.service`) muestra exactamente
+la secuencia sospechada:
+
+- `16:22:48` y `16:22:51` — dos intentos fallidos consecutivos (PIDs `319092` y
+  `319094`), ambos con `OSError: [Errno 98] address already in use` — el puerto seguía
+  tomado por el proceso manual `313645`.
+- `16:22:54` — un tercer intento (PID `319110`) sí logra bindear y loguea "escuchando",
+  pero no sobrevive (systemd lo reinicia casi de inmediato).
+- `16:22:59` — cuarto intento (PID `319124`) logra bindear y **es el que sigue vivo
+  hasta ahora**, sin más reinicios.
+
+El proceso manual viejo (`313645`) no aparece ya en `ps aux` — dejó de correr solo en
+algún momento entre su último log (`15:47:52`, un health check) y el primer intento
+fallido de systemd (`16:22:48`); no quedó registro de un shutdown explícito (ni
+`KeyboardInterrupt` ni señal loguéada) porque su salida estaba en un archivo fuera de
+`journalctl`. No fue necesario matarlo manualmente en esta sesión — ya no existía al
+momento del diagnóstico.
+
+**Estado verificado al momento de este diagnóstico (sin sudo interactivo disponible en
+esta sesión — ver nota abajo):**
+
+- `ps aux | grep cva_gesture_bridge` → un solo proceso: PID `319124`, bajo
+  `systemd` (`CGroup: /system.slice/cva-gesture-bridge.service`).
+- `tmux ls` → una sola sesión, `cva-claude` — que resultó ser **esta misma sesión de
+  Claude Code**, no un bridge viejo corriendo en segundo plano. Nada que matar ahí.
+- `ss -ltnp | grep 8766` (sin sudo, visible por ser proceso propio del mismo usuario) →
+  una sola línea, PID `319124` — coincide con el `MainPID` del servicio.
+- `systemctl show cva-gesture-bridge.service -p NRestarts` → `NRestarts=0` desde que
+  `319124` arrancó (`ActiveEnterTimestamp: 2026-09-10 16:22:59`, `Restart=always`) — sin
+  reinicios adicionales en la ~1h30 que lleva corriendo.
+- Health check final (paso 5): `nc -zv 127.0.0.1 8766` → `succeeded`, y
+  `journalctl -u cva-gesture-bridge.service -n 5` confirma la línea correspondiente
+  "cerrada sin datos (health check)" justo después.
+
+**Paso 3 del diagnóstico (restart manual de confirmación) — NO ejecutado:** requiere
+`sudo systemctl restart cva-gesture-bridge.service`, y esta sesión no tiene sudo
+configurado sin contraseña interactiva (`sudo -n` falla con "interactive authentication
+is required"). Dado que el servicio ya lleva ~1h30 estable con 0 reinicios desde su
+último arranque exitoso, no se considera necesario forzar un restart solo para
+confirmar estabilidad — pero si JD quiere esa confirmación explícita, debe correr el
+comando él mismo con `sudo` (tiene la contraseña interactiva) y pegar la salida de
+`sudo systemctl status cva-gesture-bridge.service --no-pager -l` aquí.
+
+**Conclusión:** el servicio `systemd` está estable, con un solo proceso limpio
+escuchando en el puerto 8766, sin duplicados ni reinicios en curso. El conflicto inicial
+fue un choque puntual (una sola vez) entre el proceso manual de pruebas de esta sesión y
+el arranque del servicio nuevo, ya resuelto por sí solo antes de este diagnóstico — no
+un problema recurrente del código del bridge.
