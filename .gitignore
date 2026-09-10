@@ -20,3 +20,11 @@ Thumbs.db
 
 # ── IDE ──
 .vscode/
+
+# ── Segundo cerebro — Graphify/Obsidian (tooling de desarrollo local, nunca al repo) ──
+graphify-out/
+.agent/rules/graphify.md
+.agent/workflows/graphify.md
+.agents/
+.mcp.json
+.graphifyignore

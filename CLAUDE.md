@@ -206,3 +206,36 @@ en vez de asumir una solución.
 Reporta explícitamente: qué archivos creaste, confirmación de que los frames de un
 cliente real (o un test que simule uno) llegan y se loguean con conteo/tamaño/fps
 correctos, y los resultados de los tests. Espera la revisión antes de tocar Fase 7.
+
+## 9. Segundo cerebro (Graphify) — instálalo también en este repo
+
+El repo del cliente (`LaboRemoto`) ya usa Graphify (grafo de código vía AST,
+Tree-sitter) como herramienta de orientación de bajo costo en tokens. Este repo
+(`cva-pi-repo`) es independiente — su propio grafo, no comparte nada con el del
+cliente, porque son máquinas y repos distintos. Instálalo aquí también, siguiendo el
+mismo criterio:
+
+```bash
+pip install --upgrade graphifyy
+graphify install                # o --platform windows si aplica, no es el caso aquí
+graphify claude install         # para que lo actives automáticamente sin pedirlo
+```
+
+Antes de la primera corrida, crea `.graphifyignore` en la raíz de este repo
+excluyendo: `reference/` (son copias de solo lectura del código del cliente, no hace
+falta indexarlas dos veces — ya están en el grafo del otro repo) y cualquier archivo
+con credenciales reales si en algún momento aparecen (`.env`, claves de la Pi, etc.).
+
+Primera corrida: `/graphify .` desde la raíz de este repo. Luego `graphify hook
+install` para que se actualice solo con cada commit (background, no bloquea).
+
+**Disciplina de uso — la misma que ya rige en el resto del proyecto:**
+- Para orientarte ("¿dónde está X?", "¿qué llama a esto?", "qué se rompe si cambio
+  esto") usa `graphify explain "<símbolo>"` / `graphify path "<A>" "<B>"` antes de leer
+  archivos completos a ciegas.
+- **Nunca uses una arista `INFERRED` o `AMBIGUOUS` del grafo como base para dar por
+  cerrada una fase o una verificación de protocolo.** Solo `EXTRACTED` (verificado
+  contra el AST) cuenta como estructura confiable — y aun así, la corrección de la
+  *lógica* (no solo la estructura) se verifica leyendo el código real, nunca con el
+  grafo solo.
+- El grafo acelera por dónde mirar. No reemplaza mirar.

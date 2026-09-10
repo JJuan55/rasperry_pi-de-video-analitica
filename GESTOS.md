@@ -1,11 +1,21 @@
 # GESTOS.md — Propuesta de catálogo de gestos (cva_gesture_bridge)
 
-**Estado: PROPUESTA, pendiente de aprobación explícita de JD.** Nada de esto está
-implementado todavía — ni el catálogo de gestos crudos, ni el mapeo por módulo. La
-implementación real del mapeo gesto→instrucción es alcance de Fase 9 (ver `CLAUDE.md`,
-sección 7); este documento solo existe para discutir y cerrar la decisión antes de esa
-fase, tal como pide `CLAUDE.md` sección 4.4 ("el formato exacto... se termina de definir
-junto con JD en la Fase 7/8").
+**Estado: APROBADO por JD el 2026-09-10, con un ajuste — sujeto a revisión cuando se
+definan los controles reales de cada dispositivo (Fase 9).** El catálogo de gestos
+crudos y el mapeo tentativo quedan aprobados como punto de partida documentado, no como
+decisión final e inamovible — cuando se empiece a definir con hardware real qué
+controles necesita cada módulo, este documento se revisa y ajusta. La implementación
+real del mapeo gesto→instrucción sigue siendo alcance de Fase 9 (ver `CLAUDE.md`,
+sección 7); esto solo fija el punto de partida acordado, tal como pedía `CLAUDE.md`
+sección 4.4.
+
+**Ajuste aprobado (revisión de Claude + JD, 2026-09-10):** `dedo_medio` se retira de los
+mapeos de **ambos** módulos (no solo Robot) — un gesto técnico de detección de una sola
+mano extendida se puede leer como ofensivo en un entorno universitario con otras
+personas presentes, y no vale la pena el riesgo cuando hay alternativas (`dedo_pulgar`
+cubre "girar derecha" en Robot). Sigue existiendo en el catálogo de gestos crudos que
+reconoce la visión — el ajuste es solo que nunca se traduce a una instrucción real en
+ningún módulo.
 
 ## Por qué hace falta definir esto
 
