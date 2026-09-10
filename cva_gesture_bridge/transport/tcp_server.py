@@ -17,14 +17,22 @@ FRAME_LENGTH_BYTES = 4
 
 
 class ConnectionStats:
-    """Contadores de una conexión persistente: frames, bytes, fps real medido."""
+    """Contadores de una conexión persistente: frames, bytes, fps y latencia real medidos."""
 
     def __init__(self) -> None:
         self.total_frames = 0
         self.total_bytes = 0
+        self.last_latency_ms = 0.0
         self._start = time.monotonic()
+        self._last_frame_at = self._start
 
     def record_frame(self, size: int) -> None:
+        now = time.monotonic()
+        # Latencia real entre frames consecutivos (Fase 7 — checkpoint end-to-end).
+        # En el primer frame no hay frame anterior con qué comparar: se mide desde
+        # el inicio de la conexión.
+        self.last_latency_ms = (now - self._last_frame_at) * 1000.0
+        self._last_frame_at = now
         self.total_frames += 1
         self.total_bytes += size
 
@@ -42,7 +50,7 @@ class TcpServer:
         host: str,
         port: int,
         watchdog_factory: Optional[Callable[[], object]] = None,
-        on_frame: Optional[Callable[[str, int, float], None]] = None,
+        on_frame: Optional[Callable[[str, int, float, float], None]] = None,
     ) -> None:
         self._host = host
         self._port = port
@@ -110,10 +118,10 @@ class TcpServer:
                 if watchdog is not None:
                     watchdog.feed()
                 if self._on_frame is not None:
-                    self._on_frame(str(peer), len(jpeg_bytes), stats.fps)
+                    self._on_frame(str(peer), len(jpeg_bytes), stats.fps, stats.last_latency_ms)
                 logger.info(
-                    "Frame #%d de %s: %d bytes, fps_real=%.2f",
-                    stats.total_frames, peer, len(jpeg_bytes), stats.fps,
+                    "Frame #%d de %s: %d bytes, fps_real=%.2f, latencia_ms=%.1f",
+                    stats.total_frames, peer, len(jpeg_bytes), stats.fps, stats.last_latency_ms,
                 )
         finally:
             if watchdog is not None:

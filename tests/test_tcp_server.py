@@ -48,8 +48,8 @@ async def test_health_check_connect_and_close_without_data_survives():
 async def test_receives_and_counts_a_single_frame():
     received = []
 
-    def on_frame(peer, size, fps):
-        received.append((size, fps))
+    def on_frame(peer, size, fps, latency_ms):
+        received.append((size, fps, latency_ms))
 
     server, task = await _running_server(on_frame=on_frame)
     try:
@@ -60,9 +60,10 @@ async def test_receives_and_counts_a_single_frame():
         await asyncio.sleep(0.1)
 
         assert len(received) == 1
-        size, fps = received[0]
+        size, fps, latency_ms = received[0]
         assert size == len(payload)
         assert fps > 0
+        assert latency_ms >= 0
 
         writer.close()
         await writer.wait_closed()
@@ -74,7 +75,7 @@ async def test_receives_and_counts_a_single_frame():
 async def test_receives_multiple_frames_in_sequence_on_same_connection():
     received = []
 
-    def on_frame(peer, size, fps):
+    def on_frame(peer, size, fps, latency_ms):
         received.append(size)
 
     server, task = await _running_server(on_frame=on_frame)
@@ -87,6 +88,36 @@ async def test_receives_multiple_frames_in_sequence_on_same_connection():
         await asyncio.sleep(0.1)
 
         assert received == [10, 20, 30]
+
+        writer.close()
+        await writer.wait_closed()
+    finally:
+        task.cancel()
+        await server.close()
+
+
+async def test_latency_ms_measures_real_gap_between_consecutive_frames():
+    latencies = []
+
+    def on_frame(peer, size, fps, latency_ms):
+        latencies.append(latency_ms)
+
+    server, task = await _running_server(on_frame=on_frame)
+    try:
+        reader, writer = await asyncio.open_connection("127.0.0.1", server.port)
+        payload = b"x" * 5
+
+        writer.write(struct.pack(">I", len(payload)) + payload)
+        await writer.drain()
+        await asyncio.sleep(0.1)  # gap real y medible antes del segundo frame
+
+        writer.write(struct.pack(">I", len(payload)) + payload)
+        await writer.drain()
+        await asyncio.sleep(0.05)
+
+        assert len(latencies) == 2
+        # El segundo frame debe reflejar el ~0.1s de espera real entre ambos.
+        assert latencies[1] >= 80.0
 
         writer.close()
         await writer.wait_closed()

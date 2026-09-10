@@ -82,6 +82,98 @@ implementa nada de visión, mapeo de gestos ni integración con `arduino_bridge.
 actuadores). El hueco de `module_id` (CLAUDE.md sección 4.5) sigue sin resolver, como se
 espera hasta que sea relevante.
 
-**Esperando aprobación explícita del usuario antes de tocar Fase 7.**
+**Aprobado por el usuario el 2026-09-10.** Commit `a7ef9b6` pusheado a `origin/main`.
 
 ---
+
+## Fase 7 — Checkpoint end-to-end con el cliente real
+
+**Estado:** en curso
+
+### Tasklist (alcance según CLAUDE.md sección 7, roadmap — Fase 7 no tiene sección de
+alcance detallada propia como la Fase 6; se deriva de la línea de roadmap: "checkpoint de
+validación end-to-end con el cliente real (sin actuadores todavía). Aquí se mide latencia
+real y se define el catálogo definitivo de gestos.")
+
+- [ ] Instrumentar latencia real por frame en el bridge (además del fps ya existente de
+      Fase 6), con su test pytest.
+- [ ] Ejecutar el checkpoint end-to-end contra el cliente real (Tauri) vía túnel SSH:
+      health check + frames reales + conexión persistente.
+- [ ] Registrar en esta bitácora la latencia y fps reales observados en la prueba real.
+- [ ] Proponer y, con aprobación de JD, cerrar el catálogo definitivo de gestos (solo
+      catálogo/decisión documentada — el mapeo real gesto→instrucción es Fase 9, no se
+      implementa aquí).
+
+### Desarrollo
+
+- `cva_gesture_bridge/transport/tcp_server.py`: `ConnectionStats` ahora mide
+  `last_latency_ms` — el tiempo real entre la llegada de un frame y el anterior sobre la
+  misma conexión (para el primer frame, se mide desde el inicio de la conexión). Se
+  reporta junto al fps ya existente en el log por frame y en el callback `on_frame`
+  (nueva firma: `on_frame(peer, size, fps, latency_ms)` — cambio compatible hacia atrás
+  solo en el sentido de que Fase 6 no tenía consumidores reales de este callback en
+  `main.py`).
+- Tests actualizados (`tests/test_tcp_server.py`) a la nueva firma de `on_frame`, más un
+  test nuevo (`test_latency_ms_measures_real_gap_between_consecutive_frames`) que fuerza
+  una espera real de ~0.1s entre dos frames y verifica que la latencia medida lo refleje.
+- `pytest`: **11 passed** (10 de Fase 6 + 1 nuevo de latencia), 0 fallidos.
+
+**Pendiente de esta fase:** ejecutar el checkpoint real contra el cliente Tauri vía túnel
+SSH (el usuario confirmó tener el cliente real disponible) y registrar aquí los valores
+reales de fps/latencia observados; cerrar el catálogo definitivo de gestos con JD.
+
+### Informe — instrumentación de latencia y arranque del checkpoint (2026-09-10)
+
+**Qué se hizo:**
+
+1. Se abrió esta sección de Fase 7 en la bitácora con su tasklist, antes de tocar
+   código (siguiendo el flujo de trabajo acordado: tasklist primero, código después).
+2. Se agregó la medición de latencia real por frame al bridge (tarea 1 de la tasklist).
+3. Se levantó el bridge en segundo plano en esta misma Pi, escuchando en el puerto 8766,
+   para que el checkpoint end-to-end contra el cliente real (tarea 2) se pueda ejecutar
+   de inmediato en cuanto el usuario conecte el cliente Tauri.
+4. Se propuso (fuera de la bitácora, en el chat) un catálogo inicial de gestos crudos y
+   un mapeo tentativo por módulo, para revisión de JD antes de cerrarlo (tarea 4). No se
+   escribió a ningún archivo de configuración todavía — es solo propuesta.
+
+**Cómo se hizo, paso a paso:**
+
+- Antes de escribir código, se releyeron `reference/config/domotica.json` y
+  `reference/config/robot.json` (copias de solo lectura del cliente real) para verificar
+  si ya existía algún mapeo gesto→instrucción — ambos tienen `"mapping": {}` vacío, lo
+  que confirmó que el catálogo de gestos no existe todavía en ningún lado y debía
+  proponerse desde cero, no inventarse como si ya estuviera decidido.
+- En `cva_gesture_bridge/transport/tcp_server.py`, la clase `ConnectionStats` se amplió
+  con un campo `last_latency_ms` y un timestamp interno `_last_frame_at`. Cada vez que
+  llega un frame (`record_frame`), se calcula la diferencia en milisegundos entre el
+  momento actual y el del frame anterior sobre la misma conexión (para el primer frame,
+  la referencia es el inicio de la conexión) — esto mide la latencia real entre frames
+  consecutivos, complementando el fps promedio que ya existía desde Fase 6.
+- Ese valor se propagó a dos lugares que ya existían: el log por frame (ahora incluye
+  `latencia_ms=%.1f` junto a `fps_real`) y el callback opcional `on_frame`, cuya firma
+  cambió de `(peer, size, fps)` a `(peer, size, fps, latency_ms)`.
+- Como la firma de `on_frame` cambió, se actualizaron los dos tests existentes que la
+  usaban (`test_receives_and_counts_a_single_frame`,
+  `test_receives_multiple_frames_in_sequence_on_same_connection`) para que reciban el
+  nuevo parámetro sin romperse.
+- Se agregó un test nuevo, `test_latency_ms_measures_real_gap_between_consecutive_frames`:
+  manda un frame, espera realmente ~0.1s con `asyncio.sleep`, manda un segundo frame, y
+  verifica que la latencia medida en el segundo frame sea de al menos 80ms — es decir,
+  que la métrica refleje una espera real y no un valor inventado o constante.
+- Se corrió `pytest` completo (`.venv/bin/pytest -q`): **11 passed, 0 failed** (los 10 de
+  Fase 6 más el nuevo de latencia) — ningún test existente se rompió con el cambio de
+  firma.
+- Antes de levantar el servidor real, se verificó con `ss -ltnp | grep 8766` que el
+  puerto estuviera libre (nada más escuchando ahí todavía).
+- Se arrancó el bridge real con
+  `CVA_LOG_LEVEL=INFO nohup .venv/bin/python -m cva_gesture_bridge.main`, en segundo
+  plano, con el log redirigido a `/tmp/cva_bridge_fase7.log` (fuera del repo, es un
+  archivo de trabajo temporal de esta sesión, no versionado). Se confirmó que quedó
+  escuchando en `0.0.0.0:8766` revisando de nuevo `ss -ltnp` (proceso `python`, PID
+  visible) y el contenido inicial del log (línea `cva_gesture_bridge escuchando en
+  ('0.0.0.0', 8766)`).
+- Con el bridge real corriendo, se le pidió al usuario ejecutar la parte que no se puede
+  automatizar desde este lado: abrir el cliente Tauri real, conectar por SSH a esta Pi e
+  iniciar una sesión CVA, para que los frames reales lleguen al bridge y se pueda medir
+  fps/latencia reales — eso queda pendiente de que el usuario lo haga y reporte el
+  resultado, o de revisar directamente `/tmp/cva_bridge_fase7.log` una vez ocurra.
