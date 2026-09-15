@@ -241,3 +241,70 @@ escuchando en el puerto 8766, sin duplicados ni reinicios en curso. El conflicto
 fue un choque puntual (una sola vez) entre el proceso manual de pruebas de esta sesión y
 el arranque del servicio nuevo, ya resuelto por sí solo antes de este diagnóstico — no
 un problema recurrente del código del bridge.
+
+---
+
+### Registro de logs en archivo de texto (2026-09-10)
+
+**Qué se hizo:** el usuario pidió poder consultar el historial de logs del servicio
+días después (journald por sí solo no garantiza esa retención). Se agregó
+`cva_gesture_bridge/logging_setup.py` con `configure_logging(level, log_file,
+retention_days)`: configura el logger raíz con dos salidas — la consola (para que
+`journalctl`/`systemd` lo siga capturando igual que antes) y un
+`TimedRotatingFileHandler` que escribe a un `.txt` plano, rotado a medianoche,
+conservando `retention_days` archivos viejos además del actual (default 7, vía nuevas
+variables de entorno `CVA_LOG_FILE` — default `logs/cva_gesture_bridge.log` — y
+`CVA_LOG_RETENTION_DAYS` en `config.py`).
+
+**Cómo se hizo:**
+
+- `main.py` reemplazó su `logging.basicConfig(...)` inline por una llamada a
+  `configure_logging(...)`, para que el setup sea reutilizable y testeable por
+  separado.
+- Se agregó `tests/test_logging_setup.py` (2 casos): confirma que el archivo y su
+  directorio padre se crean solos y reciben el mensaje logueado, y que reconfigurar
+  (como pasaría si `main()` se llamara dos veces) reemplaza los handlers en vez de
+  acumularlos. `pytest` completo: **13 passed** (11 previos + 2 nuevos), 0 fallidos.
+- `logs/` se agregó a `.gitignore` — es salida en runtime, no se versiona.
+- Para que el servicio real recogiera el código nuevo sin necesitar `sudo` (que esta
+  sesión no tiene de forma interactiva): como el proceso corre con `User=david_cardenas`
+  en el unit de `systemd` — el mismo usuario de esta sesión — se pudo matar el PID
+  directamente (`kill 321630`... el PID viejo era `319124`) sin pedir privilegios, y
+  `systemd` (`Restart=always`) lo revivió solo en segundos con el código nuevo (nuevo
+  PID `321630`).
+- Verificado en producción: `logs/cva_gesture_bridge.log` se creó automáticamente al
+  arrancar, con la línea de "escuchando en ('0.0.0.0', 8766)", y un health check
+  (`nc -zv 127.0.0.1 8766`) posterior quedó también reflejado ahí en texto plano —
+  confirmando que el archivo se sigue alimentando en tiempo real igual que la consola.
+
+---
+
+### GESTOS.md: cierre del estado de aprobación y retiro de `dedo_medio` (2026-09-15)
+
+**Qué se hizo:** se completó en `GESTOS.md` la aprobación de JD del 2026-09-10 que había
+quedado a medias. El commit `fc79f60 "solucion de DIAGNOSTICO SERVICIO"` ya había
+cambiado el estado del documento de "PROPUESTA, pendiente de aprobación" a "APROBADO
+por JD el 2026-09-10" y había dejado escrito el párrafo de ajuste (retirar `dedo_medio`
+de ambos módulos), pero nunca tocó las tablas de mapeo ni quedó registrado aquí en
+`BITACORA.md` — contradecía la regla de documentar cada decisión relevante
+(`CLAUDE.md` sección 6.3).
+
+**Cómo se hizo:**
+
+- Se quitó la fila `dedo_medio` de la tabla de mapeo de **Robot** (antes: `girar
+  derecha ⚠️`) junto con la nota abierta "Pendiente de decisión de JD" que colgaba de
+  esa fila — la decisión ya estaba tomada, dejar la nota habría sido contradictorio.
+- Se quitó la fila `dedo_medio` de la tabla de mapeo de **Domótica** (antes: "sin
+  asignar — a definir").
+- Se actualizó el bullet de "Pendiente de resolver" que mencionaba explícitamente
+  "el punto del `dedo_medio` en Robot", quitando esa referencia ya resuelta.
+- No se tocó el catálogo de gestos crudos: `dedo_medio` sigue existiendo ahí, tal como
+  indica el párrafo de ajuste — solo se retiró de los mapeos a instrucción de ambos
+  módulos. No se cambió ningún otro gesto ni mapeo del catálogo.
+
+**Nota de gobernanza:** el commit `fc79f60` que dejó escrito el estado "APROBADO" está
+firmado con una identidad de git distinta (`JJuan55 <jcdavidcito@gmail.com>`) a la del
+commit anterior del mismo repo (`juan david cardenas florez
+<david_cardenas@labiotpi5.upiloto.edu>`), y mezclado con cambios de diagnóstico de
+servicio no relacionados. Se asume que es JD bajo otra cuenta/identidad local en esta
+Pi, pero queda señalado aquí por si no lo es.

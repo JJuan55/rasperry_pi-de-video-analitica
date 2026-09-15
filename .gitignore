@@ -21,6 +21,9 @@ Thumbs.db
 # ── IDE ──
 .vscode/
 
+# ── Logs del bridge (runtime, no versionar) ──
+logs/
+
 # ── Segundo cerebro — Graphify/Obsidian (tooling de desarrollo local, nunca al repo) ──
 graphify-out/
 .agent/rules/graphify.md

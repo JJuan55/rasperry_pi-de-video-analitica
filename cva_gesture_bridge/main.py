@@ -4,6 +4,7 @@ import asyncio
 import logging
 
 from cva_gesture_bridge import config
+from cva_gesture_bridge.logging_setup import configure_logging
 from cva_gesture_bridge.transport.tcp_server import TcpServer
 from cva_gesture_bridge.transport.watchdog import Watchdog
 
@@ -26,10 +27,7 @@ async def run() -> None:
 
 
 def main() -> None:
-    logging.basicConfig(
-        level=config.LOG_LEVEL,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
+    configure_logging(config.LOG_LEVEL, config.LOG_FILE, config.LOG_RETENTION_DAYS)
     try:
         asyncio.run(run())
     except KeyboardInterrupt:

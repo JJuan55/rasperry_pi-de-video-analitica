@@ -62,12 +62,6 @@ instrucción:
 | `dedo_indice` | girar izquierda |
 | `dedo_anular` | mover adelante (fijo, ya probado) |
 | `dedo_menique` | retroceder |
-| `dedo_medio` | girar derecha ⚠️ |
-
-⚠️ **Nota abierta:** usar `dedo_medio` aislado como gesto técnico puede leerse como un
-gesto ofensivo aunque la intención sea puramente de detección de visión. Alternativa
-sugerida: usar `dedo_pulgar` para "girar derecha" y liberar `dedo_medio` sin asignar (o
-no incluirlo en el catálogo de Robot). **Pendiente de decisión de JD.**
 
 ### Domótica (Arduino)
 
@@ -79,12 +73,10 @@ no incluirlo en el catálogo de Robot). **Pendiente de decisión de JD.**
 | `dedo_indice` | cerrar puerta |
 | `dedo_anular` | (sin asignar — a definir) |
 | `dedo_menique` | (sin asignar — a definir) |
-| `dedo_medio` | (sin asignar — a definir) |
 
 ## Pendiente de resolver antes de que esto sea definitivo
 
-- Confirmar o ajustar el mapeo tentativo de ambos módulos (especialmente el punto del
-  `dedo_medio` en Robot).
+- Confirmar o ajustar el resto del mapeo tentativo de ambos módulos.
 - Decidir qué pasa con los gestos "sin asignar" en Domótica — ¿se dejan sin instrucción
   (ignorados) o se completan con más acciones del módulo (ventilador, alarma, etc.)?
 - Resolver el hueco de `module_id` (`CLAUDE.md` sección 4.5) — el bridge todavía no sabe
