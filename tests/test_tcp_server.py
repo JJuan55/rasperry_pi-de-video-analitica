@@ -176,6 +176,56 @@ async def test_connection_closed_mid_frame_is_handled_without_crashing():
         await server.close()
 
 
+async def test_on_jpeg_frame_receives_bytes_and_can_reply_with_send_line():
+    # Fase 8: on_jpeg_frame es el enganche real de visión, pero este test no depende
+    # de YOLO/OpenCV — usa un callback falso para probar solo el wiring de tcp_server.
+    received_frames = []
+
+    async def on_jpeg_frame(jpeg_bytes, writer):
+        received_frames.append(jpeg_bytes)
+        await TcpServer.send_line(writer, "gesto: dedo_anular, confianza: 0.90")
+
+    server, task = await _running_server(on_jpeg_frame=on_jpeg_frame)
+    try:
+        reader, writer = await asyncio.open_connection("127.0.0.1", server.port)
+        payload = b"\xff\xd8\xff" + (b"x" * 50)
+        writer.write(struct.pack(">I", len(payload)) + payload)
+        await writer.drain()
+
+        line = await asyncio.wait_for(reader.readline(), timeout=1.0)
+        assert line == b"gesto: dedo_anular, confianza: 0.90\n"
+        assert received_frames == [payload]
+
+        writer.close()
+        await writer.wait_closed()
+    finally:
+        task.cancel()
+        await server.close()
+
+
+async def test_on_jpeg_frame_exception_is_logged_and_connection_keeps_working():
+    async def on_jpeg_frame(jpeg_bytes, writer):
+        raise RuntimeError("fallo simulado del detector")
+
+    server, task = await _running_server(on_jpeg_frame=on_jpeg_frame)
+    try:
+        reader, writer = await asyncio.open_connection("127.0.0.1", server.port)
+        payload = b"x" * 10
+        writer.write(struct.pack(">I", len(payload)) + payload)
+        writer.write(struct.pack(">I", len(payload)) + payload)
+        await writer.drain()
+        await asyncio.sleep(0.1)
+
+        # La conexión debe seguir viva pese al fallo del callback de visión.
+        assert not writer.is_closing()
+
+        writer.close()
+        await writer.wait_closed()
+    finally:
+        task.cancel()
+        await server.close()
+
+
 async def test_send_line_writes_utf8_terminated_in_newline():
     received = bytearray()
 

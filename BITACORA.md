@@ -308,3 +308,228 @@ commit anterior del mismo repo (`juan david cardenas florez
 <david_cardenas@labiotpi5.upiloto.edu>`), y mezclado con cambios de diagnóstico de
 servicio no relacionados. Se asume que es JD bajo otra cuenta/identidad local en esta
 Pi, pero queda señalado aquí por si no lo es.
+
+---
+
+## Fase 8 — `vision/detector.py` (YOLO + OpenCV real, sin actuadores)
+
+**Estado:** cerrada del lado de código/benchmark — **pendiente de validación manual de
+JD con cámara real** antes de poder decir que cumple AC3. Alto aquí para revisión antes
+de Fase 9.
+
+### Tasklist (alcance acordado con JD para esta fase, más estricto que el roadmap
+genérico de `CLAUDE.md` sección 7 — catálogo reducido de 4 gestos, no los 7 completos)
+
+- [x] Benchmark real en esta Pi 5 de al menos 2-3 tamaños de modelo YOLO (nano/small,
+      medium si el hardware lo permite) — FPS y latencia de inferencia real, documentado
+      aquí antes de fijar cuál se usa.
+- [x] Decisión de arquitectura de visión (bloqueaba el resto de la fase, se preguntó
+      explícitamente a JD antes de escribir código): no existe ningún modelo/dataset ya
+      entrenado para los 4 gestos — JD eligió **YOLO solo para localizar la región de
+      la mano/persona + OpenCV clásico (contorno, convex hull, convexity defects) para
+      contar dedos y clasificar el gesto** — sin fine-tuning ni modelos de terceros.
+- [x] `cva_gesture_bridge/vision/detector.py`: integra YOLO + OpenCV sobre los frames
+      JPEG que ya llegan por `tcp_server.py`, reconoce los 4 gestos acordados
+      (`puño_cerrado`, `palma_abierta`, `dedo_indice`, `dedo_anular`) con un umbral de
+      confianza configurable por variable de entorno (mismo patrón que `config.py`).
+- [x] Salida por dos canales ya existentes, ningún protocolo nuevo: log local
+      (gesto + confianza) y `TcpServer.send_line()` (reservado desde Fase 6, primer uso
+      real aquí) sobre la misma conexión persistente. Nada de instrucciones de actuador
+      todavía — eso es Fase 9.
+- [x] Tests pytest para lo testeable sin cámara real (conteo de dedos sobre contornos
+      sintéticos, formato de la línea, lógica de umbral). Lo que dependa de inferencia
+      real sobre video real, queda como validación manual documentada (igual que el
+      smoke test de Fase 6) — **requiere que JD pose los 4 gestos frente a una cámara
+      real; no se pudo automatizar desde esta sesión** (ver nota de acceso a cámara más
+      abajo).
+- [ ] Medir contra AC3 del spec (≥70% aciertos con luz normal, resultado visible en
+      <1.5s) — **pendiente**, solo puede cerrarse con la validación manual de JD.
+      Documentado abajo como pendiente explícito, no como "funciona".
+- [x] Reporte de cierre de fase (esta sección) y alto para revisión de JD antes de
+      Fase 9. No se implementó `mapping/gesture_map.py` ni `actuators/` en esta fase.
+
+### Nota — sin acceso a cámara real desde esta sesión
+
+Esta Pi tiene varios nodos `/dev/video19`-`/dev/video35` (stack de cámara), pero el
+usuario de esta sesión no tiene permiso de lectura sobre ellos (`Permission denied` al
+intentar abrirlos con OpenCV/v4l2) — y aunque lo tuviera, la arquitectura real del
+proyecto no depende de una cámara local en la Pi: el video viene del cliente (webcam
+del estudiante) por túnel SSH, no de esta máquina. Por eso el benchmark de velocidad
+usa un frame de muestra (`zidane.jpg`, incluido con el paquete `ultralytics`,
+reescalado a 640x480 y re-codificado a JPEG) — válido para medir FPS/latencia de
+inferencia, pero **no para medir precisión de reconocimiento de gestos**, que
+necesita fotos reales de una mano hacienda cada uno de los 4 gestos. Eso solo lo puede
+generar JD posando frente a una cámara real (la del cliente Tauri, o cualquier webcam),
+razón por la que AC3 queda pendiente de esa validación manual.
+
+### Decisión de arquitectura de visión (antes de escribir código)
+
+Se le preguntó explícitamente a JD cómo reconocer los 4 gestos, porque no había ningún
+modelo ni dataset ya decidido para esto (a diferencia de lo que ya estaba fijo en
+`CLAUDE.md`/`GESTOS.md`, que solo dicen "YOLO + OpenCV" como stack, sin especificar
+qué detecta YOLO exactamente). Se plantearon 3 opciones: (a) fine-tuning rápido de
+YOLOv8-cls con fotos capturadas en el momento por JD, (b) YOLO para detectar la
+región de la mano/persona + OpenCV clásico para contar dedos, sin entrenar nada, (c)
+bajar un modelo de gestos ya entrenado de terceros (Roboflow/HuggingFace) — descartada
+por riesgo de cadena de suministro (pesos `.pt` de origen no verificado) y porque sus
+clases casi seguro no coinciden con las 4 nuestras. **JD eligió (b).**
+
+Como no hay ninguna clase "mano" en los pesos oficiales de COCO sin fine-tuning, el rol
+real de YOLO en esta implementación es localizar la clase `person` (COCO clase 0) como
+región de interés para acotar la búsqueda — si no se detecta ninguna persona (frecuente
+si el frame es un acercamiento de la mano sola, sin torso/cara visible), se usa el
+frame completo. La clasificación real del gesto es 100% OpenCV clásico: segmentación
+de piel por color en HSV dentro de esa región, contorno más grande, convex hull +
+convexity defects para dedos extendidos.
+
+### Decisiones descartadas (alternativas a YOLO+OpenCV que se plantearon y no se usaron)
+
+**(a) Fine-tuning rápido de un clasificador YOLOv8-cls con fotos capturadas en el
+momento.** Usar los checkpoints oficiales de Ultralytics (`yolov8n/s/m-cls.pt`, fuente
+confiable, no terceros) y afinarlos ahora mismo con ~50-100 fotos reales por gesto,
+posadas por JD frente a la cámara de esta sesión. Es la opción más robusta en teoría —
+un modelo realmente entrenado para estos 4 gestos, en vez de una heurística geométrica
+— pero se descartó por dos razones prácticas: (1) tomaba bastante más tiempo de esta
+sesión (captura de dataset + entrenamiento, aunque sea corto, en CPU de esta Pi) antes
+de tener nada que probar, y (2) dependía de que JD estuviera disponible para posar los
+gestos en el momento exacto de la sesión, algo que no se puede coordinar de forma
+síncrona por chat. Queda como la opción más sólida a reconsiderar en una fase
+posterior si la heurística de OpenCV no llega al 70% de AC3 — la infraestructura para
+correrla (YOLO ya instalado, catálogo de 4 gestos ya cerrado) queda lista, solo
+faltaría el dataset y el entrenamiento en sí.
+
+**(c) Modelo de gestos de terceros ya entrenado (Roboflow Universe / HuggingFace).**
+La opción más rápida de conseguir "en teoría" — bajar un modelo que alguien más ya
+entrenó para reconocer gestos de mano. Se descartó por dos motivos, no solo velocidad:
+riesgo de cadena de suministro real (cargar un archivo `.pt` de un origen no verificado
+puede ejecutar código arbitrario al deserializar, a diferencia de los checkpoints
+oficiales de Ultralytics usados en las otras dos opciones) y porque es muy poco
+probable que las clases de un modelo de terceros coincidan exactamente con los 4
+nombres/gestos ya fijados en `GESTOS.md` (`puño_cerrado`, `palma_abierta`,
+`dedo_indice`, `dedo_anular`) — habría que mapear o reentrenar de todos modos, perdiendo
+la ventaja de velocidad que la hacía atractiva en primer lugar.
+
+**(b) YOLO para detectar la mano/persona + OpenCV para contar dedos — la elegida.**
+Sin entrenar nada ni depender de que JD estuviera disponible para posar gestos en el
+momento, y sin pesos de origen no verificado. La contrapartida, documentada arriba en
+"Medición contra AC3": es una heurística geométrica, no un modelo aprendido, así que su
+precisión real (sobre todo la desambiguación índice/anular y la sensibilidad de la
+segmentación por color de piel) todavía no está probada contra una mano real — es el
+costo de haber evitado el entrenamiento.
+
+### Benchmark real de tamaño de modelo YOLO en esta Pi 5 (2026-09-15)
+
+Script puntual (no forma parte del paquete): decodifica el mismo frame de prueba
+(640x480 JPEG) con `cv2.imdecode` y corre `model.predict(...)` — mismo camino real que
+usará el detector — con 3 iteraciones de warmup descartadas y 30 iteraciones medidas
+por tamaño de modelo. Pesos oficiales de Ultralytics (`yolov8n.pt`, `yolov8s.pt`,
+`yolov8m.pt`, descargados de `github.com/ultralytics/assets`, sin fine-tuning).
+
+| Modelo | FPS promedio | Latencia promedio | Latencia p95 | Latencia min/max |
+|---|---|---|---|---|
+| `yolov8n.pt` (nano)  | 2.27 | 440.3 ms  | 456.0 ms  | 424.3 / 526.4 ms |
+| `yolov8s.pt` (small) | 0.80 | 1242.2 ms | 1249.8 ms | 1234.4 / 1270.4 ms |
+| `yolov8m.pt` (medium)| 0.35 | 2821.9 ms | 2856.7 ms | 2772.0 / 2927.0 ms |
+
+**Decisión: `yolov8n.pt` (nano).** Es el único tamaño con margen real frente al límite
+de AC3 (<1.5s) una vez se suma el resto del procesamiento (segmentación OpenCV,
+decode, envío) — `small` ya está pegado al límite sin ese margen (1.24s promedio) y
+`medium` lo excede casi al doble (2.82s). `medium` y `small` quedan descartados para
+esta fase, no por hardware insuficiente en términos absolutos sino porque no dejan
+margen de seguridad frente al criterio de aceptación.
+
+**Hallazgo adicional — costo de arranque en frío:** la primera inferencia real después
+de cargar el modelo tomó **1.82s** (por encima del límite de AC3), notablemente más
+lenta que el régimen estable (~440-447ms medido en 5 llamadas consecutivas
+posteriores). Se agregó un warmup síncrono en `main.py` (`_warm_up`, corre una
+detección sobre un frame negro en blanco al arrancar, antes de aceptar conexiones) para
+que ese costo se pague una sola vez al iniciar el servicio, no en el primer gesto real
+de un estudiante.
+
+### Desarrollo
+
+- `cva_gesture_bridge/config.py`: dos variables nuevas, mismo patrón de override por
+  entorno que las ya existentes — `YOLO_MODEL` (`CVA_YOLO_MODEL`, default
+  `"yolov8n.pt"`, la decisión del benchmark de arriba) y `MIN_CONFIDENCE`
+  (`CVA_MIN_CONFIDENCE`, default `0.5`, punto de partida a ajustar con datos reales).
+- `cva_gesture_bridge/vision/detector.py` (nuevo):
+  - `count_finger_gaps`/`count_extended_fingers`: cuentan dedos extendidos vía
+    convexity defects, normalizando la profundidad del defect contra la diagonal del
+    bounding box (para que el umbral no dependa del tamaño de la mano en el frame). Con
+    0 huecos cualificados no se puede distinguir puño cerrado de un solo dedo extendido
+    solo con defects (no hay dedo vecino con quien formar un hueco) — se usa el aspect
+    ratio del bounding box como segunda señal.
+  - `classify_gesture`: mapea el conteo de dedos a los 4 gestos del catálogo de esta
+    fase. **El caso de 1 dedo extendido (índice vs. anular) se desambigua por la
+    posición horizontal de la punta del dedo respecto al centro del bounding box** —
+    es el supuesto más frágil de todo el diseño: asume una orientación de mano
+    consistente (dorso o palma de frente a la cámara, dedo hacia arriba). Si en la
+    validación real JD encuentra que índice y anular salen intercambiados, es un ajuste
+    de una línea (invertir la comparación), no un rediseño.
+  - `segment_hand`: segmentación de piel en HSV con un rango fijo (`_SKIN_HSV_LOW`/
+    `_SKIN_HSV_HIGH`) + limpieza morfológica (open/close) + contorno más grande. **Es
+    una heurística conocida por ser sensible al tono de piel y a la iluminación** —
+    riesgo real para el ≥70% de AC3, no verificado todavía contra piel/luz reales.
+  - `GestureDetector`: junta todo — decodifica el JPEG, corre YOLO para acotar la
+    región (`person`, clase COCO 0; si no detecta nada usa el frame completo),
+    segmenta la mano, cuenta dedos, clasifica, arma el `GestureResult`.
+  - `format_line`: función libre (no depende de un modelo cargado, para poder
+    testearla sin YOLO) que arma la línea final o devuelve `None` si no hay gesto o no
+    llega al umbral de confianza — nunca manda una instrucción de actuador, solo
+    `"gesto: <nombre>, confianza: <0.00-1.00>"`.
+- `cva_gesture_bridge/transport/tcp_server.py`: nuevo parámetro opcional
+  `on_jpeg_frame` (async, recibe `jpeg_bytes` y el `writer`) — **separado** del
+  `on_frame` que ya usaban los tests de Fase 6/7, para no volver a cambiarle la firma a
+  ese callback. Se llama después de `on_frame` en el mismo loop de lectura, envuelto en
+  `try/except Exception` con `logger.exception` (no silencioso: se loguea el traceback
+  completo) para que un fallo del detector no tumbe la conexión persistente completa.
+- `cva_gesture_bridge/main.py`: instancia `GestureDetector` una sola vez al arrancar
+  (no por frame), hace el warmup descrito arriba, y conecta `on_jpeg_frame` a
+  `loop.run_in_executor(...)` — la inferencia es síncrona y bloqueante (~440ms), correr
+  en un thread aparte evita congelar el loop de asyncio mientras dura. Si el resultado
+  supera el umbral de confianza, loguea y manda la línea con `TcpServer.send_line`.
+- `requirements.txt` (nuevo): dependencias reales de runtime (`torch`/`torchvision`
+  **CPU-only**, `ultralytics`, `opencv-python`). Se instalaron primero `torch`/
+  `torchvision` desde `https://download.pytorch.org/whl/cpu` explícitamente — la
+  instalación por defecto de `ultralytics` arrastra ~15 paquetes `nvidia-cu13-*`
+  (toolkit CUDA completo) aunque esta Pi no tiene GPU NVIDIA; el índice CPU-only evita
+  ese desperdicio de ancho de banda/disco. `*.pt` ya estaba en `.gitignore` desde antes
+  (no hubo que tocarlo) — los pesos descargados no se versionan.
+- Tests nuevos:
+  - `tests/test_detector.py` (13 casos): conteo de dedos y clasificación sobre
+    contornos sintéticos dibujados a propósito (puño = círculo compacto, un dedo =
+    base + un rectángulo angosto a la izquierda/derecha, palma abierta = silueta en
+    abanico de 5 puntas a alturas distintas — las alturas iguales fallaban porque el
+    convex hull trata puntas colineales como un solo borde y reporta un solo defect en
+    vez de uno por valle, se descubrió al correr el test), y formato/umbral de
+    `format_line`.
+  - `tests/test_tcp_server.py` (+2 casos): que `on_jpeg_frame` reciba los bytes reales
+    y pueda contestar por `send_line` sobre el mismo socket, y que una excepción dentro
+    de `on_jpeg_frame` no tumbe la conexión (se loguea y se sigue leyendo).
+  - `pytest` completo: **26 passed, 0 failed** (13 previos + 13 nuevos de detector + 2
+    de tcp_server, neto +13 sobre los 13 que había).
+- Validación manual (smoke test, sin cámara real — análoga a la de Fase 6): se corrió
+  `GestureDetector.detect()` completo contra un frame real (`zidane.jpg` reescalado)
+  para confirmar que el pipeline entero no truena de punta a punta. Resultado:
+  `GestureResult(gesture=None, confidence=0.0, extended_fingers=2)` — 2 dedos
+  detectados en una región de piel (cara/mano de la foto) no es ninguno de los 4
+  gestos del catálogo, así que correctamente no manda nada; no hay crash. Esto
+  confirma que el código corre de punta a punta en hardware real, **no que reconozca
+  gestos correctamente** — eso requiere fotos reales de las 4 poses.
+
+### Medición contra AC3 — PENDIENTE, no cerrado
+
+**No se puede afirmar que este detector cumple AC3 (≥70% aciertos, <1.5s) todavía.**
+Lo único medido con datos reales en esta Pi es la velocidad (tabla de arriba: ~440ms
+por gesto en régimen estable, dentro del límite de 1.5s con margen). La precisión de
+reconocimiento (los 4 gestos correctos, con luz normal) depende de una segmentación
+por color de piel y una heurística de conteo que nunca se probaron contra una mano
+real — **JD necesita posar cada uno de los 4 gestos frente a una cámara real (la del
+cliente Tauri por túnel SSH, o cualquier webcam) y reportar aquí cuántos de N intentos
+por gesto salieron correctos.** Si el acierto queda por debajo del 70%, los puntos más
+probables de ajuste, en orden de sospecha: el rango HSV de piel (`_SKIN_HSV_LOW`/
+`_SKIN_HSV_HIGH` en `detector.py`, sensible a tono de piel/iluminación), el umbral de
+profundidad de convexity defects (`_MIN_DEFECT_DEPTH_RATIO`), y la desambiguación
+índice/anular (ver nota arriba, es el supuesto más frágil).
+
+**Esperando validación manual de JD y su aprobación explícita antes de tocar Fase 9.**

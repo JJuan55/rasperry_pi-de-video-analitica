@@ -1,0 +1,16 @@
+# Dependencias de runtime del bridge (Fase 8 en adelante — visión real).
+#
+# torch/torchvision deben instalarse primero desde el índice CPU-only de PyTorch,
+# para no arrastrar ~5GB de paquetes CUDA inútiles en esta Pi 5 (sin GPU NVIDIA):
+#
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+#   pip install -r requirements.txt
+#
+# (el --extra-index-url de abajo alcanza si se instala todo en un solo paso, pero el
+# comando de dos pasos de arriba es el que se usó y verificó en esta sesión)
+--extra-index-url https://download.pytorch.org/whl/cpu
+
+torch==2.14.0+cpu
+torchvision==0.29.0+cpu
+ultralytics==8.4.153
+opencv-python==5.0.0.93

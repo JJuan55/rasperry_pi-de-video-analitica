@@ -9,7 +9,7 @@ import asyncio
 import logging
 import struct
 import time
-from typing import Callable, Optional
+from typing import Awaitable, Callable, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -51,11 +51,18 @@ class TcpServer:
         port: int,
         watchdog_factory: Optional[Callable[[], object]] = None,
         on_frame: Optional[Callable[[str, int, float, float], None]] = None,
+        on_jpeg_frame: Optional[
+            Callable[[bytes, asyncio.StreamWriter], Awaitable[None]]
+        ] = None,
     ) -> None:
         self._host = host
         self._port = port
         self._watchdog_factory = watchdog_factory
         self._on_frame = on_frame
+        # Fase 8: callback async separado (en vez de ampliar on_frame de nuevo) para no
+        # tocar la firma ya usada por los tests de Fase 6/7 — recibe los bytes JPEG
+        # crudos y el writer, para que quien lo use pueda llamar a send_line().
+        self._on_jpeg_frame = on_jpeg_frame
         self._server: Optional[asyncio.base_events.Server] = None
 
     @property
@@ -119,6 +126,15 @@ class TcpServer:
                     watchdog.feed()
                 if self._on_frame is not None:
                     self._on_frame(str(peer), len(jpeg_bytes), stats.fps, stats.last_latency_ms)
+                if self._on_jpeg_frame is not None:
+                    try:
+                        await self._on_jpeg_frame(jpeg_bytes, writer)
+                    except Exception:
+                        logger.exception(
+                            "on_jpeg_frame falló procesando un frame de %s — se sigue "
+                            "leyendo la conexión, no se corta por un fallo de visión",
+                            peer,
+                        )
                 logger.info(
                     "Frame #%d de %s: %d bytes, fps_real=%.2f, latencia_ms=%.1f",
                     stats.total_frames, peer, len(jpeg_bytes), stats.fps, stats.last_latency_ms,
