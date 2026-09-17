@@ -6,6 +6,7 @@ detector de gestos real sobre cada frame y manda el resultado de vuelta al clien
 
 import asyncio
 import logging
+import time
 
 import cv2
 import numpy as np
@@ -29,8 +30,23 @@ def _make_watchdog() -> Watchdog:
     return Watchdog(config.WATCHDOG_TIMEOUT_SECONDS, _on_watchdog_timeout)
 
 
-def _make_on_jpeg_frame(detector: GestureDetector):
+def _make_on_jpeg_frame(detector: GestureDetector, cooldown_seconds: float):
+    # last_processed_at vive en este closure, creado una sola vez por arranque del
+    # bridge — el cooldown es global al proceso, no por conexión (ver nota en
+    # BITACORA.md "Fase 8": para el uso real de este proyecto, una sola conexión
+    # persistente por sesión, equivale a un cooldown por sesión).
+    last_processed_at = None
+
     async def on_jpeg_frame(jpeg_bytes: bytes, writer: asyncio.StreamWriter) -> None:
+        nonlocal last_processed_at
+        now = time.monotonic()
+        if last_processed_at is not None and (now - last_processed_at) < cooldown_seconds:
+            # Todavía en cooldown (pedido por JD el 2026-09-17, ver BITACORA.md "Fase
+            # 8") — se descarta este frame para visión sin correr el detector. El
+            # conteo de fps/bytes de Fase 6/7 (on_frame) no se ve afectado.
+            return
+        last_processed_at = now
+
         loop = asyncio.get_running_loop()
         # La inferencia YOLO+OpenCV es CPU-bound y no async — se corre en un thread
         # aparte para no bloquear el loop mientras dura (cientos de ms, ver benchmark
@@ -70,7 +86,7 @@ async def run() -> None:
         config.BRIDGE_HOST,
         config.BRIDGE_PORT,
         watchdog_factory=_make_watchdog,
-        on_jpeg_frame=_make_on_jpeg_frame(detector),
+        on_jpeg_frame=_make_on_jpeg_frame(detector, config.GESTURE_COOLDOWN_SECONDS),
     )
     await server.start()
     await server.serve_forever()

@@ -10,9 +10,10 @@ convexity defects). Es un prototipo heurístico, no un clasificador entrenado �
 precisión real contra AC3 (≥70% aciertos) depende de la validación manual con cámara
 real documentada en BITACORA.md, no de este código en aislamiento.
 
-Catálogo de esta fase (subconjunto de GESTOS.md, decisión de JD): puño_cerrado,
-palma_abierta, dedo_indice, dedo_anular. `dedo_menique`, `dedo_medio` y sus mapeos
-completos quedan para fases futuras.
+Catálogo de esta fase (subconjunto de GESTOS.md, decisión de JD — ajustado el
+2026-09-17 tras la primera prueba manual, ver BITACORA.md): puño_cerrado,
+palma_abierta, dedo_pulgar, dedo_menique. `dedo_indice`, `dedo_anular`, `dedo_medio` y
+el mapeo completo quedan para fases futuras.
 """
 
 import logging
@@ -27,8 +28,8 @@ logger = logging.getLogger(__name__)
 
 GESTURE_PUÑO_CERRADO = "puño_cerrado"
 GESTURE_PALMA_ABIERTA = "palma_abierta"
-GESTURE_DEDO_INDICE = "dedo_indice"
-GESTURE_DEDO_ANULAR = "dedo_anular"
+GESTURE_DEDO_PULGAR = "dedo_pulgar"
+GESTURE_DEDO_MENIQUE = "dedo_menique"
 
 # COCO class 0 = "person" — no existe clase de "mano" en los pesos oficiales sin
 # fine-tuning (ver nota de arquitectura arriba).
@@ -136,8 +137,9 @@ def count_extended_fingers(contour: np.ndarray) -> int:
 
 
 def classify_gesture(contour: np.ndarray, extended_fingers: int) -> Tuple[Optional[str], float]:
-    """Clasifica el gesto entre los 4 del catálogo de esta fase, con una confianza
-    heurística (no es una probabilidad aprendida — ver nota de módulo)."""
+    """Clasifica el gesto entre los 4 del catálogo de esta fase (puño_cerrado,
+    palma_abierta, dedo_pulgar, dedo_menique), con una confianza heurística (no es una
+    probabilidad aprendida — ver nota de módulo)."""
     area = cv2.contourArea(contour)
     hull = cv2.convexHull(contour)
     hull_area = cv2.contourArea(hull)
@@ -155,15 +157,20 @@ def classify_gesture(contour: np.ndarray, extended_fingers: int) -> Tuple[Option
         aspect = (h / w) if w > 0 else 0.0
         confidence = min(1.0, aspect / _SINGLE_FINGER_ASPECT_CONFIDENT)
 
-        # Desambiguar índice vs. anular por la posición horizontal de la punta del
-        # dedo respecto al centro del bounding box. Asume una orientación de mano
-        # consistente (dorso o palma de frente a la cámara, dedos hacia arriba) — es
-        # el supuesto más frágil de esta fase, ver reporte de cierre de Fase 8.
+        # Desambiguar pulgar vs. meñique por la posición horizontal de la punta del
+        # dedo respecto al centro del bounding box (son los dos dedos más laterales
+        # de la mano, así que esta heurística de izquierda/derecha encaja mejor que
+        # con dedos centrales). Asume una orientación de mano consistente (dorso o
+        # palma de frente a la cámara) — es el supuesto más frágil de esta fase, ver
+        # BITACORA.md "Fase 8". El pulgar en particular puede extenderse de forma
+        # lateral en vez de hacia arriba (p.ej. un "thumbs up" girado), lo que puede
+        # no producir el bounding box alto-y-angosto que asume el aspect ratio de
+        # arriba — verificar explícitamente en la validación manual, no asumir.
         fingertip = min(contour.reshape(-1, 2).tolist(), key=lambda p: p[1])
         center_x = x + w / 2.0
         if fingertip[0] < center_x:
-            return GESTURE_DEDO_INDICE, confidence
-        return GESTURE_DEDO_ANULAR, confidence
+            return GESTURE_DEDO_PULGAR, confidence
+        return GESTURE_DEDO_MENIQUE, confidence
 
     # 2 o 3 dedos extendidos: fuera del catálogo de 4 gestos de esta fase.
     return None, 0.0

@@ -12,8 +12,8 @@ import cv2
 import numpy as np
 
 from cva_gesture_bridge.vision.detector import (
-    GESTURE_DEDO_ANULAR,
-    GESTURE_DEDO_INDICE,
+    GESTURE_DEDO_MENIQUE,
+    GESTURE_DEDO_PULGAR,
     GESTURE_PALMA_ABIERTA,
     GESTURE_PUÑO_CERRADO,
     GestureResult,
@@ -96,17 +96,17 @@ def test_classify_gesture_open_palm_is_palma_abierta():
     assert 0.0 < confidence <= 1.0
 
 
-def test_classify_gesture_single_finger_on_left_is_indice():
+def test_classify_gesture_single_finger_on_left_is_pulgar():
     contour = _one_finger_contour(finger_on_left=True)
     gesture, confidence = classify_gesture(contour, extended_fingers=1)
-    assert gesture == GESTURE_DEDO_INDICE
+    assert gesture == GESTURE_DEDO_PULGAR
     assert 0.0 < confidence <= 1.0
 
 
-def test_classify_gesture_single_finger_on_right_is_anular():
+def test_classify_gesture_single_finger_on_right_is_menique():
     contour = _one_finger_contour(finger_on_left=False)
     gesture, confidence = classify_gesture(contour, extended_fingers=1)
-    assert gesture == GESTURE_DEDO_ANULAR
+    assert gesture == GESTURE_DEDO_MENIQUE
     assert 0.0 < confidence <= 1.0
 
 
@@ -124,11 +124,11 @@ def test_format_line_returns_none_without_gesture():
 
 
 def test_format_line_returns_none_below_confidence_threshold():
-    result = GestureResult(gesture=GESTURE_DEDO_ANULAR, confidence=0.3, extended_fingers=1)
+    result = GestureResult(gesture=GESTURE_DEDO_MENIQUE, confidence=0.3, extended_fingers=1)
     assert format_line(result, min_confidence=0.5) is None
 
 
 def test_format_line_formats_gesture_and_confidence_above_threshold():
-    result = GestureResult(gesture=GESTURE_DEDO_ANULAR, confidence=0.876, extended_fingers=1)
+    result = GestureResult(gesture=GESTURE_DEDO_MENIQUE, confidence=0.876, extended_fingers=1)
     line = format_line(result, min_confidence=0.5)
-    assert line == "gesto: dedo_anular, confianza: 0.88"
+    assert line == "gesto: dedo_menique, confianza: 0.88"

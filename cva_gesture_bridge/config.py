@@ -24,3 +24,8 @@ YOLO_MODEL = os.environ.get("CVA_YOLO_MODEL", "yolov8n.pt")
 # cliente (sección 4.4 de CLAUDE.md). Punto de partida, se ajusta con datos reales
 # de la validación manual documentada en BITACORA.md.
 MIN_CONFIDENCE = float(os.environ.get("CVA_MIN_CONFIDENCE", "0.5"))
+
+# Tiempo mínimo entre que se procesa un gesto (se corre YOLO+OpenCV sobre un frame) y
+# se procesa el siguiente — pedido por JD el 2026-09-17 tras la primera prueba manual,
+# para no correr el detector en cada frame (~2.5 fps real). Ver BITACORA.md "Fase 8".
+GESTURE_COOLDOWN_SECONDS = float(os.environ.get("CVA_GESTURE_COOLDOWN_SECONDS", "5"))

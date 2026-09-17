@@ -533,3 +533,84 @@ profundidad de convexity defects (`_MIN_DEFECT_DEPTH_RATIO`), y la desambiguaci�
 índice/anular (ver nota arriba, es el supuesto más frágil).
 
 **Esperando validación manual de JD y su aprobación explícita antes de tocar Fase 9.**
+
+---
+
+### Ajuste de catálogo y throttling, pedido por JD tras la prueba manual (2026-09-17)
+
+JD corrió una sesión real contra el bridge desplegado hoy (ver el historial de logs
+revisado en esta misma sesión de chat: 60 gestos detectados, 44 `puño_cerrado` + 16
+`palma_abierta`, sesión de `12:35:26` a `12:37:10`). A partir de esa prueba pidió dos
+ajustes explícitos, antes de seguir con la validación de AC3:
+
+#### Tasklist
+
+- [x] **Reducir el catálogo de esta fase** de `{puño_cerrado, palma_abierta,
+      dedo_indice, dedo_anular}` a `{puño_cerrado, palma_abierta ("mano abierta"),
+      dedo_pulgar, dedo_menique}` — se sacan `dedo_indice`/`dedo_anular`, entran
+      `dedo_pulgar`/`dedo_menique`. Solo afecta el subconjunto de Fase 8 (código +
+      esta bitácora); `GESTOS.md` (el catálogo completo de 7 gestos aprobado para
+      fases futuras) no se toca.
+- [x] **Throttling entre detecciones:** dejar de procesar un gesto por cada frame
+      (hoy corre la detección completa en cada frame que llega, ~2.5-2.6 fps real
+      medido hoy). En vez de eso, esperar 5 segundos entre que se procesa un gesto y
+      se intenta procesar el siguiente — configurable por variable de entorno, mismo
+      patrón que el resto de `config.py`.
+- [x] Actualizar los tests afectados por el rename de gestos y agregar tests nuevos
+      para el throttling.
+- [x] Reporte de cierre de este ajuste puntual.
+
+#### Desarrollo
+
+- `cva_gesture_bridge/vision/detector.py`: se renombraron las constantes
+  `GESTURE_DEDO_INDICE`/`GESTURE_DEDO_ANULAR` a `GESTURE_DEDO_PULGAR`
+  (`"dedo_pulgar"`) / `GESTURE_DEDO_MENIQUE` (`"dedo_menique"`). La lógica geométrica
+  del caso "1 dedo extendido" no cambió (sigue siendo la posición horizontal de la
+  punta del dedo respecto al centro del bounding box) — solo se re-etiquetó qué lado
+  es cuál gesto. **Nota honesta:** pulgar y meñique sí son, geométricamente, los dos
+  dedos más laterales de la mano — este heurístico de "izquierda/derecha" encaja mejor
+  con ellos que con índice/anular (que son más centrales), pero el riesgo de fondo
+  sigue siendo el mismo que ya estaba documentado: la heurística de aspect-ratio para
+  detectar "1 dedo extendido" se diseñó asumiendo un dedo apuntando hacia arriba desde
+  la base de la mano, y un pulgar extendido lateralmente (como un "thumbs up" girado,
+  o un autoestop) puede no producir el mismo bounding box alto-y-angosto — esto es
+  nuevo respecto a lo que había antes (índice/anular sí apuntan hacia arriba de forma
+  natural) y debe verificarse explícitamente en la validación manual de AC3, no
+  asumirse resuelto.
+- `cva_gesture_bridge/config.py`: nueva variable `GESTURE_COOLDOWN_SECONDS`
+  (`CVA_GESTURE_COOLDOWN_SECONDS`, default `"5"`) — mismo patrón de override por
+  entorno que las demás.
+- `cva_gesture_bridge/main.py`: `_make_on_jpeg_frame` ahora recibe también
+  `cooldown_seconds` y mantiene un `last_processed_at` (closure, `time.monotonic()`).
+  Si un frame llega antes de que pase el cooldown desde el último frame *procesado*
+  (haya dado gesto o no), se descarta sin correr el detector — no se llama a
+  `detector.detect()`, no se loguea, no se manda nada. El conteo de fps/bytes por
+  frame (`on_frame`, Fase 6/7) sigue corriendo sobre todos los frames igual que antes
+  — el throttling es solo del lado de visión, no de la lectura del socket. Efecto
+  esperado además del pedido de JD: baja notablemente la carga de CPU de esta Pi,
+  porque ya no corre YOLO+OpenCV en cada frame (~2.5 veces por segundo) sino como
+  máximo una vez cada 5s.
+  **Simplificación consciente:** `last_processed_at` vive en el closure de
+  `_make_on_jpeg_frame`, que se crea una sola vez por arranque del bridge (no por
+  conexión) — el cooldown es global al proceso, no por sesión/conexión. Para el uso
+  real de este proyecto (una sola conexión persistente por sesión de práctica, sección
+  4.1 de `CLAUDE.md`) es equivalente a un cooldown por sesión, pero si en el futuro
+  hubiera conexiones concurrentes activas, una competiría por el mismo cooldown de la
+  otra. No se consideró necesario resolverlo ahora (agregaría una factory como la que
+  ya existe para `watchdog_factory`), pero queda anotado por si se vuelve relevante.
+- `tests/test_detector.py`: se renombraron los tests y asserts que usaban
+  `GESTURE_DEDO_INDICE`/`GESTURE_DEDO_ANULAR` a `GESTURE_DEDO_PULGAR`/
+  `GESTURE_DEDO_MENIQUE` — la lógica de los tests no cambió, solo las constantes
+  importadas y el texto esperado de `format_line`.
+- `tests/test_main.py` (nuevo, 4 casos): cooldown con un detector falso (sin YOLO
+  real) — el primer frame siempre se procesa, un frame que llega dentro de la ventana
+  de cooldown se descarta sin llamar a `detector.detect()`, un frame que llega después
+  de que pasa el cooldown sí se procesa, y el cooldown cuenta desde el último frame
+  *procesado* aunque no haya dado gesto (no solo desde el último gesto mandado).
+- `pytest` completo: **30 passed, 0 failed** (26 previos + 4 nuevos de cooldown).
+
+**Estado del despliegue:** este ajuste está en el working tree, todavía **no
+commiteado ni desplegado** — el servicio `systemd` en producción (`cva-gesture-bridge`,
+el que generó el historial de gestos revisado hoy) sigue corriendo el código anterior
+(catálogo de 4 dedos viejo, sin cooldown) hasta que se commitee y se reinicie el
+servicio. No se tocó el servicio en esta sesión.
