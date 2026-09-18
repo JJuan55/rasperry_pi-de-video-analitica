@@ -808,3 +808,46 @@ candidato"), no seguir ajustando el número a ciegas.
 **Pendiente:** commitear este ajuste, redesplegar (mismo mecanismo: matar el PID,
 systemd lo revive), y que JD repita la prueba del puño sostenido — si ahora se detecta
 y sigue sin haber falsos positivos sin mano, se cierra este ajuste.
+
+---
+
+### Bajar a 0.15 NO fue suficiente — diagnóstico temporal en INFO (2026-09-18)
+
+Se commiteó (`c36a844`) y redesplegó el ajuste anterior (mismo mecanismo: matar el PID
+del proceso, `Restart=always` lo revive). JD repitió la prueba del puño sostenido: **0
+líneas "Gesto detectado" otra vez**, en dos sesiones reales más (265 y 565 frames, ~38s
+y ~81s respectivamente). Bajar la fracción de exclusión no arregló nada — la hipótesis
+del turno anterior (la ROI cortaba la mano) no está confirmada ni descartada, seguía
+siendo una suposición sin visibilidad real.
+
+**Decisión: dejar de ajustar números a ciegas.** Se instrumentó `detector.py` (dentro
+de `GestureDetector.detect()`) y `main.py` con logging de diagnóstico **a propósito en
+nivel `INFO`, no `DEBUG`** — el servicio en producción corre con `CVA_LOG_LEVEL=INFO`
+y esta sesión no tiene `sudo` para subirlo sin tocar código, así que subir el nivel del
+logging mismo (marcado `[diag]`, fácil de grep y de revertir) es la forma de obtener
+visibilidad real sin necesitar privilegios que no están disponibles.
+
+**Qué queda instrumentado, en orden del pipeline:**
+1. Tamaño del frame decodificado.
+2. Si YOLO detectó una `person` (bbox) o no (fallback a frame completo).
+3. La ROI resultante tras excluir la franja superior.
+4. Si `segment_hand()` encontró o no un contorno de piel suficientemente grande.
+5. Del contorno encontrado: área, bbox, aspect ratio, solidity, y si pasó
+   `_is_plausible_hand_contour()`.
+6. El resultado final de `classify_contour()`.
+7. En `main.py`: el gesto candidato crudo y si el `GestureStabilizer` lo confirmó.
+
+Con esto, la próxima corrida de JD debería mostrar exactamente en cuál de esos 7 pasos
+se está perdiendo el puño (¿YOLO no detecta persona? ¿la ROI recortada queda vacía o
+sin la mano? ¿no se segmenta contorno de piel? ¿se segmenta pero se rechaza por
+plausibilidad? ¿se clasifica bien pero el stabilizer nunca junta 3 seguidos?).
+
+**Es temporal — marcado explícitamente `[diag]` y con comentarios `DIAGNÓSTICO
+TEMPORAL` en el código.** Hay que revertirlo (volver a `logger.debug`) una vez que se
+entienda la causa real y se corrija; dejarlo en INFO permanentemente sería demasiado
+ruido para operación normal. `pytest`: **43 passed** (no se tocó ninguna lógica, solo
+logging).
+
+**Pendiente:** commitear, redesplegar, que JD repita la prueba del puño sostenido, y
+traer aquí (o pegar) las líneas `[diag]` de esa corrida para diagnosticar la causa real
+antes de tocar ningún número más.

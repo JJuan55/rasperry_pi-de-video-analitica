@@ -60,14 +60,17 @@ def _make_on_jpeg_frame(detector: GestureDetector, cooldown_seconds: float, stab
         # se manda al cliente hasta que se repite `stability_streak` veces seguidas.
         confirmed_gesture = stabilizer.observe(result.gesture)
 
+        # DIAGNÓSTICO TEMPORAL (2026-09-18, ver BITACORA.md "Fase 8"): a propósito en
+        # INFO, no DEBUG, mismo motivo que en detector.py. Revertir a logger.debug una
+        # vez resuelta la investigación de por qué dejó de detectar un puño real.
         if result.gesture is not None:
-            logger.debug(
-                "Gesto candidato: %s (confianza=%.2f, dedos_extendidos=%d, confirmado=%s)",
+            logger.info(
+                "[diag] Gesto candidato: %s (confianza=%.2f, dedos_extendidos=%d, confirmado=%s)",
                 result.gesture, result.confidence, result.extended_fingers,
                 confirmed_gesture is not None,
             )
         else:
-            logger.debug("Sin gesto reconocido en este frame (dedos_extendidos=%d)", result.extended_fingers)
+            logger.info("[diag] Sin gesto reconocido en este frame (dedos_extendidos=%d)", result.extended_fingers)
 
         if confirmed_gesture is None:
             return

@@ -338,22 +338,47 @@ class GestureDetector:
             logger.warning("No se pudo decodificar un frame JPEG recibido (%d bytes)", len(jpeg_bytes))
             return GestureResult(None, 0.0, 0)
 
+        # DIAGNÓSTICO TEMPORAL (2026-09-18, ver BITACORA.md "Fase 8" — investigación de
+        # por qué el fix de falsos positivos dejó de detectar un puño real sostenido).
+        # A propósito en INFO, no DEBUG: el servicio en producción corre con
+        # CVA_LOG_LEVEL=INFO y esta sesión no tiene sudo para subirlo sin tocar código.
+        # Revertir a logger.debug (o quitar) una vez que se entienda la causa real.
+        frame_h, frame_w = frame.shape[:2]
+        logger.info("[diag] frame decodificado: %dx%d", frame_w, frame_h)
+
         roi_box = self._find_person_roi(frame)
         if roi_box is not None:
             x1, y1, x2, y2 = roi_box
+            logger.info("[diag] persona detectada por YOLO: bbox=%s", roi_box)
             # Excluir la franja superior de la caja "persona" (ahí suele estar la
             # cara) antes de segmentar piel — fix de falsos positivos sin mano
             # presente, ver BITACORA.md "Fase 8".
             y1 = y1 + int((y2 - y1) * _FACE_EXCLUSION_TOP_FRACTION)
             roi = frame[y1:y2, x1:x2]
+            logger.info("[diag] ROI tras excluir franja superior (%.0f%%): y1=%d..y2=%d, x1=%d..x2=%d",
+                        _FACE_EXCLUSION_TOP_FRACTION * 100, y1, y2, x1, x2)
         else:
+            logger.info("[diag] YOLO NO detectó ninguna 'person' — se usa el frame completo como ROI")
             roi = frame
 
         contour = segment_hand(roi)
         if contour is None:
+            logger.info("[diag] segment_hand() no encontró ningún contorno de piel suficientemente grande en la ROI")
             return GestureResult(None, 0.0, 0)
 
-        return classify_contour(contour)
+        x, y, w, h = cv2.boundingRect(contour)
+        area = cv2.contourArea(contour)
+        hull_area = cv2.contourArea(cv2.convexHull(contour))
+        solidity = (area / hull_area) if hull_area > 0 else 0.0
+        plausible = _is_plausible_hand_contour(contour)
+        logger.info(
+            "[diag] contorno segmentado: area=%.0f bbox=%dx%d aspect=%.2f solidity=%.2f plausible=%s",
+            area, w, h, (h / w if w > 0 else 0.0), solidity, plausible,
+        )
+
+        result = classify_contour(contour)
+        logger.info("[diag] resultado: gesture=%s confianza=%.2f dedos=%d", result.gesture, result.confidence, result.extended_fingers)
+        return result
 
     def format_line(self, result: GestureResult) -> Optional[str]:
         return format_line(result, self._min_confidence)
