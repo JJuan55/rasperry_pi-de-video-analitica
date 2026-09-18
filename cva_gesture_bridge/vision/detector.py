@@ -72,7 +72,16 @@ _MAX_PLAUSIBLE_SOLIDITY = 0.95
 
 # Franja superior de la caja "persona" de YOLO que se excluye antes de segmentar piel
 # — ahí suele estar la cara cuando el encuadre incluye más que solo la mano.
-_FACE_EXCLUSION_TOP_FRACTION = 0.35
+# Bajado de 0.35 a 0.15 el 2026-09-18: la prueba real con el servicio desplegado (JD
+# sosteniendo un puño cerrado 30s) dio 0 detecciones — el 35% original, en un encuadre
+# típico de webcam (cabeza y hombros), muy probablemente recortaba también la mano si
+# se sostiene cerca de la cara/hombro para mostrarla a la cámara, no solo la cara. El
+# filtro de plausibilidad y el GestureStabilizer (ver arriba) siguen siendo las
+# defensas principales contra la cara — este recorte ahora es solo una ayuda ligera,
+# no la defensa principal. Sigue sin estar calibrado contra fotos reales de esta Pi;
+# si 0.15 resulta insuficiente contra falsos positivos, o todavía corta manos reales,
+# hay que volver a medir, no adivinar otro número.
+_FACE_EXCLUSION_TOP_FRACTION = 0.15
 
 
 @dataclass

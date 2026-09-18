@@ -763,3 +763,48 @@ desplegado** — sigue en el working tree. Para cerrar este punto hace falta: co
 reiniciar el servicio (`systemctl restart cva-gesture-bridge.service`, necesita `sudo`
 interactivo que esta sesión no tiene), y que JD corra la prueba de `journalctl` y
 reporte aquí el resultado.
+
+---
+
+### Despliegue y corrección de sobre-ajuste (2026-09-18, misma sesión de chat)
+
+**Despliegue:** JD commiteó el fix directo (`c0edf61 "segunda implmentacion de fase
+8"`). El servicio no tiene `sudo` interactivo en esta sesión para
+`systemctl restart`, pero el proceso corre como el mismo usuario (`User=david_cardenas`
+en la unit) y tiene `Restart=always` — se reinició matando el PID viejo (`11799`)
+directamente; systemd levantó uno nuevo (`22447`) con el código del commit, confirmado
+en el log (`"Detector de gestos precalentado"`, `"escuchando en ('0.0.0.0', 8766)"`).
+
+**Prueba real de JD (sosteniendo un puño cerrado ~30s):** resultado inesperado — **0
+líneas "Gesto detectado"** en el log, a pesar de varias sesiones reales después del
+reinicio (una de 1496 frames, otra de 485, ~15 minutos de video real en total, más
+otras conexiones cortas). El fix de falsos positivos parecía estar funcionando (0
+falsos positivos también), pero a costa de bloquear gestos reales.
+
+**Causa más probable:** `_FACE_EXCLUSION_TOP_FRACTION = 0.35` — en un encuadre típico
+de webcam (cabeza y hombros), recortar el 35% superior de la caja "persona" de YOLO
+muy probablemente elimina también la mano si se sostiene cerca de la cara/hombro para
+mostrarla a la cámara (justo donde alguien sostendría un puño para demostrarlo), no
+solo la cara. No se pudo confirmar con certeza porque el nivel de log en producción es
+`INFO` (las líneas "Gesto candidato" a nivel `DEBUG` que mostrarían qué pasó frame a
+frame no quedaron registradas), y esta sesión no tiene `sudo` para cambiar el nivel de
+log del servicio y volver a probar con más detalle.
+
+**Ajuste:** `_FACE_EXCLUSION_TOP_FRACTION` bajado de `0.35` a `0.15` en
+`cva_gesture_bridge/vision/detector.py`, a pedido explícito de JD ("bájalo porque creo
+que sí quedó muy agresivo"). Con esto, la exclusión de ROI pasa a ser una ayuda ligera
+en vez de la defensa principal contra falsos positivos — esa responsabilidad recae
+ahora sobre todo en el filtro de plausibilidad (`_is_plausible_hand_contour`, techo de
+solidity 0.95) y el `GestureStabilizer` (3 frames seguidos), que no dependen de
+suposiciones sobre dónde se sostiene la mano en el encuadre. `pytest`: **43 passed**
+(sin cambios en los tests — el valor es un parámetro interno, no está testeado por
+número exacto). **Sigue sin estar calibrado contra fotos/video reales de esta Pi** —
+es una corrección basada en una hipótesis razonable, no en una medición directa del
+punto exacto donde falló; si 0.15 todavía corta manos reales o ya no es suficiente
+contra falsos positivos, hay que volver a medir con visibilidad real (idealmente JD
+corriendo el servicio manualmente con `CVA_LOG_LEVEL=DEBUG` para ver las líneas "Gesto
+candidato"), no seguir ajustando el número a ciegas.
+
+**Pendiente:** commitear este ajuste, redesplegar (mismo mecanismo: matar el PID,
+systemd lo revive), y que JD repita la prueba del puño sostenido — si ahora se detecta
+y sigue sin haber falsos positivos sin mano, se cierra este ajuste.
