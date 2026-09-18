@@ -1018,3 +1018,109 @@ antes de este segundo fix. Si (b) falla porque el gesto real no se distingue lo
 suficiente del fondo que tenía la mano antes de levantarla, es la señal de que
 `_MOTION_BACKGROUND_ALPHA`/`_MOTION_DIFF_THRESHOLD` necesitan ajuste con datos reales,
 no a ciegas.
+
+---
+
+## PAUSA — JD va a tomar decisiones de ingeniería y calidad (2026-09-18)
+
+JD pidió parar aquí, documentar el problema actual y todo lo implementado hoy, y no
+seguir tocando código hasta que decida un mejor enfoque de ingeniería. Esta sección es
+ese cierre — sin cambios de código nuevos a partir de aquí.
+
+### Resultado de la prueba (b) — con datos reales
+
+**Lo bueno confirmado:** el rostro de JD **ya no se confunde con un puño** — el primer
+fix del día (exclusión de franja superior + filtro de plausibilidad) y el segundo
+(`MotionGate`, torso) siguen funcionando para lo que se diseñaron.
+
+**Lo nuevo, reportado por JD:** con la mano real al frente, **sí detecta puño_cerrado**,
+pero **no logra reconocer los otros gestos** (palma_abierta, dedo_pulgar).
+
+**Evidencia real del `[diag]`** (sesión `17:36:28`-`17:38:15`, conexión `50734`, 748
+frames, 29 detecciones procesadas):
+
+- `dedos_extendidos` solo tomó dos valores en toda la sesión: **0 (puño), 21 veces**, y
+  **2 (fuera de catálogo), 8 veces**. **Nunca** se registró 1 (pulgar/meñique) ni 4-5
+  (palma) — ni siquiera como candidato crudo no confirmado. Esto es evidencia directa
+  de que el problema no es el `GestureStabilizer` ni el umbral de confianza: la
+  geometría del contorno nunca llega a parecer "palma" o "1 dedo" en primer lugar.
+- Los "píxeles en movimiento en la ROI" se mantuvieron altos y estables todo el tiempo
+  (20,000-37,000 px, nunca cerca de cero) — el `MotionGate` **sí sigue viendo
+  movimiento**, no es que haya dejado de detectar nada.
+- Pero el contorno resultante (después del AND entre máscara de piel y máscara de
+  movimiento) es muy inconsistente para lo que debería ser el mismo gesto sostenido:
+  aspect ratio saltando entre 0.53 y 1.24, solidity entre 0.63 y 0.88, área saltando
+  entre 6,000 y 20,745 px en cuestión de segundos.
+
+### Hipótesis de causa raíz (no implementada, solo documentada)
+
+El `MotionGate` actual hace un AND **píxel a píxel** entre la máscara de piel y la
+máscara de "cambió respecto al fondo reciente". Este diseño asume implícitamente que
+una mano real siempre aparece como un bloque completo y nuevo — pero no es así cuando
+la mano **ya lleva un rato en cuadro** y cambia de forma (puño → palma, por ejemplo):
+
+- El fondo se actualiza en cada detección procesada (~cada 5s, `alpha=0.08`) usando el
+  frame completo tal cual llega — sin distinguir si lo que hay en esa zona es "mano" o
+  no. Si la mano se queda en la misma posición general entre una detección y la
+  siguiente, parte de su silueta (la que no cambió lo suficiente entre esos ~5s) se
+  va fundiendo con el fondo aprendido.
+- Al pasar de un gesto a otro, **no toda la mano se mueve de la misma manera** — la
+  base/palma puede quedarse relativamente en el mismo lugar mientras solo los dedos
+  cambian de posición. El AND píxel a píxel entonces deja pasar solo fragmentos de la
+  mano (los que sí superaron el umbral de diferencia), no la silueta completa —
+  rompiendo exactamente la geometría de la que depende `count_extended_fingers`
+  (convex hull + convexity defects necesita un contorno *completo y continuo* de la
+  mano real, no un recorte parcial).
+- Esto explica por qué **puño sí funciona**: es plausible que sea el primer gesto que
+  JD mostró en la sesión, cuando la mano recién entraba al cuadro (todavía muy
+  distinta del fondo previo sin mano) — la silueta completa del puño sí se marcó como
+  movimiento de punta a punta. Los gestos mostrados *después*, con la mano ya en
+  cuadro y el fondo ya parcialmente adaptado a su posición, solo se ven parcialmente.
+
+**En otras palabras:** el fix de hoy resolvió el falso positivo (torso/cara sin mano)
+pero, tal como está implementado, introdujo un nuevo problema — degrada la calidad de
+la segmentación de una mano real que ya está en cuadro y cambia de gesto. Es la razón
+por la que JD quiere parar a repensar el enfoque en vez de seguir ajustando parámetros
+sueltos sobre este mismo diseño.
+
+### Resumen completo de lo hecho en Fase 8 hoy (2026-09-18), para referencia
+
+1. **Ajuste de catálogo y cooldown** (pedido explícito de JD, commits previos a esta
+   pausa): catálogo reducido a puño_cerrado/palma_abierta/dedo_pulgar/dedo_menique;
+   cooldown de 5s entre detecciones procesadas.
+2. **Primer fix de falsos positivos** (cara sin mano presente): exclusión de franja
+   superior de la caja "persona" (`_FACE_EXCLUSION_TOP_FRACTION`, bajado de 0.35 a
+   0.15 tras una primera prueba real), filtro de plausibilidad geométrica
+   (`_is_plausible_hand_contour`, aspect ratio + techo de solidity), `GestureStabilizer`
+   (primero como racha exacta, luego rediseñado a ventana deslizante "2 de últimas 3"
+   tras evidencia real de que una racha exacta casi nunca confirmaba con ruido normal
+   de una mano real sostenida).
+3. **Reducción de ruido de conteo de dedos**: `_MIN_DEFECT_DEPTH_RATIO` subido de 0.15
+   a 0.20, kernel morfológico de `segment_hand()` de (5,5) a (7,7) — para que jitter
+   normal de la máscara de piel no cruzara el umbral de "dedo extra".
+4. **Segundo fix de falsos positivos** (torso/pecho confundido con puño cuando la
+   persona está cerca de la cámara y la caja "persona" cubre casi todo el frame):
+   `MotionGate`, modelo de fondo por promedio móvil exponencial sobre el frame
+   completo, AND píxel a píxel con la máscara de piel antes de buscar contornos.
+   **Este es el punto donde se encontró el problema nuevo descrito arriba.**
+
+Todo esto está commiteado (`c36a844`, `8f8b5aa`, `d06ccad`, `e963884`) y desplegado en
+producción — el servicio corre con el código del punto 4 ahora mismo, con el
+diagnóstico `[diag]` en nivel `INFO` todavía activo (marcado como temporal, pendiente
+de revertir a `DEBUG` cuando se cierre esta investigación).
+
+### Estado: en pausa, esperando decisión de JD
+
+No se toca más código hasta que JD decida el enfoque. Puntos abiertos que quedan sobre
+la mesa para esa decisión (sin resolver aquí):
+
+- Si el AND píxel a píxel es demasiado frágil para una mano que cambia de forma en
+  cuadro, ¿la alternativa es un enfoque de movimiento más tosco (ej. exigir que la
+  *caja delimitadora* del contorno de piel se haya movido/cambiado de tamaño lo
+  suficiente, en vez de exigirlo píxel por píxel)? ¿O abandonar el `MotionGate` y
+  volver a apoyarse más en geometría (aceptando el riesgo de falsos positivos de
+  torso) combinado con otra señal distinta?
+- El diagnóstico `[diag]` en `INFO` sigue en producción — decidir si se revierte antes
+  de la próxima ronda de pruebas o se deja mientras se sigue investigando.
+- Ningún commit de hoy se ha pusheado (`git push`) — siguen solo locales en esta Pi,
+  a la espera de autorización explícita si JD quiere respaldarlos en el remoto.
