@@ -1,12 +1,16 @@
 """Tests de la parte de vision/detector.py testeable sin cámara real: la geometría de
 conteo de dedos (sobre contornos sintéticos dibujados a propósito, no fotos), la
-clasificación y el formato/umbral de la línea que sale por send_line().
+clasificación, el filtro de plausibilidad (fix de falsos positivos sin mano
+presente), el stabilizer de estabilidad temporal, y el formato/umbral de la línea
+que sale por send_line().
 
-Lo que depende de inferencia YOLO real o de fotos reales de una mano (segment_hand
+Lo que depende de inferencia YOLO real o de fotos reales de una mano/cara (segment_hand
 contra piel real, GestureDetector.detect end-to-end) queda fuera de este archivo — es
 validación manual documentada en BITACORA.md "Fase 8", igual que el smoke test de
 Fase 6.
 """
+
+import math
 
 import cv2
 import numpy as np
@@ -17,6 +21,9 @@ from cva_gesture_bridge.vision.detector import (
     GESTURE_PALMA_ABIERTA,
     GESTURE_PUÑO_CERRADO,
     GestureResult,
+    GestureStabilizer,
+    _is_plausible_hand_contour,
+    classify_contour,
     classify_gesture,
     count_extended_fingers,
     format_line,
@@ -29,9 +36,27 @@ def _contour_from_mask(mask: np.ndarray) -> np.ndarray:
 
 
 def _fist_contour() -> np.ndarray:
-    """Blob compacto y convexo, sin dedos — simula un puño cerrado."""
-    mask = np.zeros((200, 200), dtype=np.uint8)
-    cv2.circle(mask, (100, 100), 70, 255, -1)
+    """Blob compacto con textura leve (nudillos) — simula un puño cerrado real, no un
+    círculo perfecto: un círculo perfecto es geométricamente indistinguible de una cara
+    lisa, que es exactamente el bug real que motivó el filtro de plausibilidad (ver
+    `_face_contour` y BITACORA.md "Fase 8")."""
+    cx, cy, base_r, amplitude, lobes, n_points = 105, 105, 75, 0.12, 8, 40
+    points = []
+    for i in range(n_points):
+        theta = 2 * math.pi * i / n_points
+        r = base_r * (1 + amplitude * math.sin(lobes * theta))
+        points.append((int(cx + r * math.cos(theta)), int(cy + r * math.sin(theta))))
+    mask = np.zeros((220, 220), dtype=np.uint8)
+    cv2.fillPoly(mask, [np.array(points, dtype=np.int32)], 255)
+    return _contour_from_mask(mask)
+
+
+def _face_contour() -> np.ndarray:
+    """Óvalo liso de solidity muy alta — sin mano real presente, esto es justo lo que
+    `segment_hand()` encontraba al segmentar una cara por color de piel dentro de la
+    región "persona" de YOLO (bug real de producción, ver BITACORA.md "Fase 8")."""
+    mask = np.zeros((220, 180), dtype=np.uint8)
+    cv2.ellipse(mask, (90, 110), (60, 90), 0, 0, 360, 255, -1)
     return _contour_from_mask(mask)
 
 
@@ -132,3 +157,66 @@ def test_format_line_formats_gesture_and_confidence_above_threshold():
     result = GestureResult(gesture=GESTURE_DEDO_MENIQUE, confidence=0.876, extended_fingers=1)
     line = format_line(result, min_confidence=0.5)
     assert line == "gesto: dedo_menique, confianza: 0.88"
+
+
+# --- Filtro de plausibilidad (fix de falsos positivos sin mano presente) ---
+
+
+def test_face_like_contour_is_rejected_as_implausible():
+    assert _is_plausible_hand_contour(_face_contour()) is False
+
+
+def test_all_four_catalog_gesture_fixtures_are_plausible_hand_contours():
+    assert _is_plausible_hand_contour(_fist_contour())
+    assert _is_plausible_hand_contour(_open_palm_contour())
+    assert _is_plausible_hand_contour(_one_finger_contour(finger_on_left=True))
+    assert _is_plausible_hand_contour(_one_finger_contour(finger_on_left=False))
+
+
+def test_classify_contour_face_like_contour_is_not_any_of_the_4_gestures():
+    result = classify_contour(_face_contour())
+    assert result.gesture is None
+    assert result.confidence == 0.0
+
+
+def test_classify_contour_still_recognizes_legitimate_fist():
+    result = classify_contour(_fist_contour())
+    assert result.gesture == GESTURE_PUÑO_CERRADO
+
+
+def test_classify_contour_still_recognizes_legitimate_open_palm():
+    result = classify_contour(_open_palm_contour())
+    assert result.gesture == GESTURE_PALMA_ABIERTA
+
+
+# --- GestureStabilizer (estabilidad temporal, fix de falsos positivos) ---
+
+
+def test_stabilizer_does_not_confirm_before_required_streak():
+    stabilizer = GestureStabilizer(required_streak=3)
+    assert stabilizer.observe(GESTURE_PUÑO_CERRADO) is None
+    assert stabilizer.observe(GESTURE_PUÑO_CERRADO) is None
+
+
+def test_stabilizer_confirms_once_streak_is_reached():
+    stabilizer = GestureStabilizer(required_streak=3)
+    stabilizer.observe(GESTURE_PUÑO_CERRADO)
+    stabilizer.observe(GESTURE_PUÑO_CERRADO)
+    assert stabilizer.observe(GESTURE_PUÑO_CERRADO) == GESTURE_PUÑO_CERRADO
+
+
+def test_stabilizer_resets_streak_when_gesture_changes():
+    stabilizer = GestureStabilizer(required_streak=3)
+    stabilizer.observe(GESTURE_PUÑO_CERRADO)
+    stabilizer.observe(GESTURE_PUÑO_CERRADO)
+    stabilizer.observe(GESTURE_PALMA_ABIERTA)  # cambia justo antes de confirmar
+    assert stabilizer.observe(GESTURE_PALMA_ABIERTA) is None  # streak=2 del nuevo gesto
+
+
+def test_stabilizer_resets_streak_on_none():
+    stabilizer = GestureStabilizer(required_streak=3)
+    stabilizer.observe(GESTURE_PUÑO_CERRADO)
+    stabilizer.observe(GESTURE_PUÑO_CERRADO)
+    stabilizer.observe(None)  # ruido de un frame sin gesto
+    stabilizer.observe(GESTURE_PUÑO_CERRADO)
+    assert stabilizer.observe(GESTURE_PUÑO_CERRADO) is None  # solo streak=2 otra vez

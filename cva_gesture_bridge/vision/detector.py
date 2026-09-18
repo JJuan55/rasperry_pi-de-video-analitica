@@ -14,6 +14,18 @@ Catálogo de esta fase (subconjunto de GESTOS.md, decisión de JD — ajustado e
 2026-09-17 tras la primera prueba manual, ver BITACORA.md): puño_cerrado,
 palma_abierta, dedo_pulgar, dedo_menique. `dedo_indice`, `dedo_anular`, `dedo_medio` y
 el mapeo completo quedan para fases futuras.
+
+Fix de falsos positivos sin mano presente (2026-09-18, ver BITACORA.md): sin mano en
+el frame, `segment_hand()` podía tomar la cara/cuello (también piel) como el contorno
+más grande dentro de la región "persona" de YOLO. Tres defensas, de la más a la menos
+preventiva: (1) la ROI de segmentación excluye la franja superior de la caja
+"persona" (`_FACE_EXCLUSION_TOP_FRACTION`, ahí suele estar la cara); (2)
+`_is_plausible_hand_contour()` rechaza el contorno segmentado si su aspect ratio o
+solidity caen fuera de un rango plausible para una mano — una cara es notablemente más
+lisa/convexa (solidity muy alta) que cualquiera de los 4 gestos del catálogo; (3)
+`GestureStabilizer` (usado en `main.py`) exige que el mismo gesto se repita varios
+frames seguidos antes de emitirlo, para que ruido puntual de un solo frame no dispare
+nada.
 """
 
 import logging
@@ -45,6 +57,22 @@ _MIN_CONTOUR_AREA = 1500  # px² — descarta ruido pequeño en la máscara de p
 _MIN_DEFECT_DEPTH_RATIO = 0.15  # proporción de la diagonal del bounding box
 _SINGLE_FINGER_ASPECT_THRESHOLD = 1.4  # alto/ancho mínimo para distinguir 1 dedo de puño
 _SINGLE_FINGER_ASPECT_CONFIDENT = 2.2  # alto/ancho a partir del cual la confianza satura
+
+# Filtro de plausibilidad (fix de falsos positivos sin mano, ver nota de módulo y
+# BITACORA.md "Fase 8"). Calibrado contra los contornos sintéticos de
+# tests/test_detector.py, no contra fotos reales — los 4 gestos del catálogo caen en
+# solidity ~0.69-0.88, mientras que un óvalo liso tipo cara cae en ~0.99. El techo de
+# solidity es la defensa más importante de las dos: una cara puede tener casi
+# cualquier aspect ratio según el encuadre, pero difícilmente baja de esa solidity tan
+# alta (sin la textura/concavidad que sí tiene una mano real, incluso en puño).
+_MIN_PLAUSIBLE_ASPECT = 0.4
+_MAX_PLAUSIBLE_ASPECT = 4.0
+_MIN_PLAUSIBLE_SOLIDITY = 0.35
+_MAX_PLAUSIBLE_SOLIDITY = 0.95
+
+# Franja superior de la caja "persona" de YOLO que se excluye antes de segmentar piel
+# — ahí suele estar la cara cuando el encuadre incluye más que solo la mano.
+_FACE_EXCLUSION_TOP_FRACTION = 0.35
 
 
 @dataclass
@@ -176,6 +204,67 @@ def classify_gesture(contour: np.ndarray, extended_fingers: int) -> Tuple[Option
     return None, 0.0
 
 
+def _is_plausible_hand_contour(contour: np.ndarray) -> bool:
+    """Rechaza contornos que geométricamente no podrían ser ninguno de los 4 gestos
+    del catálogo — en particular, una cara/cuello segmentados por error en vez de una
+    mano (ver nota de módulo). No sustituye el conteo de dedos; es un filtro previo:
+    solo dice si vale la pena intentar clasificar el contorno."""
+    x, y, w, h = cv2.boundingRect(contour)
+    if w == 0 or h == 0:
+        return False
+
+    aspect = h / w
+    if not (_MIN_PLAUSIBLE_ASPECT <= aspect <= _MAX_PLAUSIBLE_ASPECT):
+        return False
+
+    hull_area = cv2.contourArea(cv2.convexHull(contour))
+    if hull_area <= 0:
+        return False
+    solidity = cv2.contourArea(contour) / hull_area
+
+    return _MIN_PLAUSIBLE_SOLIDITY <= solidity <= _MAX_PLAUSIBLE_SOLIDITY
+
+
+def classify_contour(contour: np.ndarray) -> GestureResult:
+    """De un contorno ya segmentado a la decisión final de gesto, pasando por el
+    filtro de plausibilidad — punto de entrada testeable sin cámara/YOLO real para
+    todo lo que no sea la segmentación de piel en sí."""
+    extended = count_extended_fingers(contour)
+    if not _is_plausible_hand_contour(contour):
+        return GestureResult(None, 0.0, extended)
+
+    gesture, confidence = classify_gesture(contour, extended)
+    return GestureResult(gesture, confidence, extended)
+
+
+class GestureStabilizer:
+    """Exige que el mismo gesto se repita en `required_streak` detecciones
+    consecutivas antes de confirmarlo — filtra ruido de un solo frame (p.ej. un
+    contorno espurio de un frame aislado) para que no dispare una línea real hacia el
+    cliente. Ver BITACORA.md "Fase 8", fix de falsos positivos sin mano presente."""
+
+    def __init__(self, required_streak: int = 3) -> None:
+        self._required_streak = required_streak
+        self._last_gesture: Optional[str] = None
+        self._streak = 0
+
+    def observe(self, gesture: Optional[str]) -> Optional[str]:
+        """Alimenta una detección cruda; devuelve el gesto ya confirmado (repetido
+        `required_streak` veces seguidas) o `None` si todavía no se confirma."""
+        if gesture is None:
+            self._last_gesture = None
+            self._streak = 0
+            return None
+
+        if gesture == self._last_gesture:
+            self._streak += 1
+        else:
+            self._last_gesture = gesture
+            self._streak = 1
+
+        return gesture if self._streak >= self._required_streak else None
+
+
 def segment_hand(frame_bgr: np.ndarray) -> Optional[np.ndarray]:
     """Encuentra el contorno más grande que parece piel dentro del frame (o ROI)."""
     hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
@@ -241,15 +330,21 @@ class GestureDetector:
             return GestureResult(None, 0.0, 0)
 
         roi_box = self._find_person_roi(frame)
-        roi = frame[roi_box[1] : roi_box[3], roi_box[0] : roi_box[2]] if roi_box else frame
+        if roi_box is not None:
+            x1, y1, x2, y2 = roi_box
+            # Excluir la franja superior de la caja "persona" (ahí suele estar la
+            # cara) antes de segmentar piel — fix de falsos positivos sin mano
+            # presente, ver BITACORA.md "Fase 8".
+            y1 = y1 + int((y2 - y1) * _FACE_EXCLUSION_TOP_FRACTION)
+            roi = frame[y1:y2, x1:x2]
+        else:
+            roi = frame
 
         contour = segment_hand(roi)
         if contour is None:
             return GestureResult(None, 0.0, 0)
 
-        extended = count_extended_fingers(contour)
-        gesture, confidence = classify_gesture(contour, extended)
-        return GestureResult(gesture, confidence, extended)
+        return classify_contour(contour)
 
     def format_line(self, result: GestureResult) -> Optional[str]:
         return format_line(result, self._min_confidence)

@@ -29,3 +29,13 @@ MIN_CONFIDENCE = float(os.environ.get("CVA_MIN_CONFIDENCE", "0.5"))
 # se procesa el siguiente — pedido por JD el 2026-09-17 tras la primera prueba manual,
 # para no correr el detector en cada frame (~2.5 fps real). Ver BITACORA.md "Fase 8".
 GESTURE_COOLDOWN_SECONDS = float(os.environ.get("CVA_GESTURE_COOLDOWN_SECONDS", "5"))
+
+# Cuántas detecciones *procesadas* consecutivas deben coincidir en el mismo gesto antes
+# de confirmarlo (loguear "Gesto detectado" y mandar send_line) — fix de falsos
+# positivos sin mano presente (2026-09-18, ver BITACORA.md "Fase 8"). Combinado con el
+# cooldown de arriba, cada detección procesada está ~GESTURE_COOLDOWN_SECONDS aparte,
+# así que confirmar toma aproximadamente GESTURE_STABILITY_STREAK *
+# GESTURE_COOLDOWN_SECONDS segundos de gesto sostenido — si eso resulta demasiado
+# lento en la validación real de AC3 (<1.5s), el ajuste es bajar uno de los dos, no
+# ambos a la vez sin medir.
+GESTURE_STABILITY_STREAK = int(os.environ.get("CVA_GESTURE_STABILITY_STREAK", "3"))

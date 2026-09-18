@@ -15,7 +15,7 @@ from cva_gesture_bridge import config
 from cva_gesture_bridge.logging_setup import configure_logging
 from cva_gesture_bridge.transport.tcp_server import TcpServer
 from cva_gesture_bridge.transport.watchdog import Watchdog
-from cva_gesture_bridge.vision.detector import GestureDetector
+from cva_gesture_bridge.vision.detector import GestureDetector, GestureStabilizer
 
 logger = logging.getLogger(__name__)
 
@@ -30,12 +30,14 @@ def _make_watchdog() -> Watchdog:
     return Watchdog(config.WATCHDOG_TIMEOUT_SECONDS, _on_watchdog_timeout)
 
 
-def _make_on_jpeg_frame(detector: GestureDetector, cooldown_seconds: float):
-    # last_processed_at vive en este closure, creado una sola vez por arranque del
-    # bridge — el cooldown es global al proceso, no por conexión (ver nota en
-    # BITACORA.md "Fase 8": para el uso real de este proyecto, una sola conexión
-    # persistente por sesión, equivale a un cooldown por sesión).
+def _make_on_jpeg_frame(detector: GestureDetector, cooldown_seconds: float, stability_streak: int):
+    # last_processed_at y stabilizer viven en este closure, creado una sola vez por
+    # arranque del bridge — tanto el cooldown como la racha de estabilidad son
+    # globales al proceso, no por conexión (ver nota en BITACORA.md "Fase 8": para el
+    # uso real de este proyecto, una sola conexión persistente por sesión, equivale a
+    # cooldown/estabilidad por sesión).
     last_processed_at = None
+    stabilizer = GestureStabilizer(required_streak=stability_streak)
 
     async def on_jpeg_frame(jpeg_bytes: bytes, writer: asyncio.StreamWriter) -> None:
         nonlocal last_processed_at
@@ -53,14 +55,27 @@ def _make_on_jpeg_frame(detector: GestureDetector, cooldown_seconds: float):
         # de Fase 8 en BITACORA.md).
         result = await loop.run_in_executor(None, detector.detect, jpeg_bytes)
 
+        # Fix de falsos positivos sin mano presente (2026-09-18, ver BITACORA.md "Fase
+        # 8"): un gesto crudo de un solo frame no se loguea como "Gesto detectado" ni
+        # se manda al cliente hasta que se repite `stability_streak` veces seguidas.
+        confirmed_gesture = stabilizer.observe(result.gesture)
+
         if result.gesture is not None:
-            logger.info(
-                "Gesto detectado: %s (confianza=%.2f, dedos_extendidos=%d)",
+            logger.debug(
+                "Gesto candidato: %s (confianza=%.2f, dedos_extendidos=%d, confirmado=%s)",
                 result.gesture, result.confidence, result.extended_fingers,
+                confirmed_gesture is not None,
             )
         else:
             logger.debug("Sin gesto reconocido en este frame (dedos_extendidos=%d)", result.extended_fingers)
 
+        if confirmed_gesture is None:
+            return
+
+        logger.info(
+            "Gesto detectado: %s (confianza=%.2f, dedos_extendidos=%d)",
+            result.gesture, result.confidence, result.extended_fingers,
+        )
         line = detector.format_line(result)
         if line is not None:
             await TcpServer.send_line(writer, line)
@@ -86,7 +101,9 @@ async def run() -> None:
         config.BRIDGE_HOST,
         config.BRIDGE_PORT,
         watchdog_factory=_make_watchdog,
-        on_jpeg_frame=_make_on_jpeg_frame(detector, config.GESTURE_COOLDOWN_SECONDS),
+        on_jpeg_frame=_make_on_jpeg_frame(
+            detector, config.GESTURE_COOLDOWN_SECONDS, config.GESTURE_STABILITY_STREAK
+        ),
     )
     await server.start()
     await server.serve_forever()

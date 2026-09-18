@@ -614,3 +614,152 @@ commiteado ni desplegado** — el servicio `systemd` en producción (`cva-gestur
 el que generó el historial de gestos revisado hoy) sigue corriendo el código anterior
 (catálogo de 4 dedos viejo, sin cooldown) hasta que se commitee y se reinicie el
 servicio. No se tocó el servicio en esta sesión.
+
+---
+
+### Fix de falsos positivos: gestos reportados sin mano presente (2026-09-18)
+
+JD confirmó con `journalctl` en vivo en esta Pi, sin ninguna mano frente a la cámara,
+que el detector desplegado reportaba gestos activamente (`puño_cerrado`,
+`palma_abierta`, `dedo_indice` variando sin patrón). **Causa raíz:** `segment_hand()`
+segmenta por color de piel dentro de toda la región "persona" que devuelve YOLO —
+región que incluye cara/cuello — y sin mano presente toma la cara (u otra piel visible)
+como el contorno más grande, alimentando esa forma a la clasificación como si fuera una
+mano real.
+
+#### Tasklist
+
+- [x] Filtro geométrico de plausibilidad sobre el contorno segmentado, antes de
+      clasificar — aspect ratio y solidity fuera de rango razonable → rechazar (sin
+      gesto), no forzar una clasificación.
+- [x] Acotar la ROI de segmentación de piel dentro de la caja "persona" de YOLO,
+      excluyendo la franja donde normalmente está la cara.
+- [x] Estabilidad temporal: exigir el mismo gesto en N frames consecutivos (2-3) antes
+      de loguear "Gesto detectado" o llamar a `send_line` — ruido de un solo frame no
+      debe disparar nada hacia el cliente.
+- [x] Test nuevo en `tests/test_detector.py`: un contorno tipo "cara" (redondo, alta
+      solidity) no se clasifica como ninguno de los 4 gestos.
+- [x] Documentar aquí qué medida(s) se implementaron y por qué, incluyendo las que se
+      consideraron y no se usaron.
+- [ ] Repetir la prueba de `journalctl -u cva-gesture-bridge.service -f` sin mano frente
+      a la cámara — criterio de aceptación: 0 líneas "Gesto detectado" y 0 `send_line`
+      durante al menos 1 minuto. **Pendiente** — requiere desplegar (commit + reinicio
+      del servicio) y una cámara real apuntando a la Pi, que esta sesión no tiene.
+
+#### Medidas implementadas y por qué
+
+**Se implementaron las tres, son complementarias — cada una cubre el punto ciego de
+la otra:**
+
+1. **Acotar la ROI (`_FACE_EXCLUSION_TOP_FRACTION = 0.35` en `detector.py`).** Es la
+   defensa más preventiva: si la cara nunca entra a `segment_hand()`, no puede ganar
+   como "el contorno más grande". Se excluye el 35% superior de la caja "persona" de
+   YOLO antes de segmentar piel — valor estimado (no calibrado contra fotos reales de
+   esta Pi), documentado como ajustable. Limitación reconocida: solo aplica cuando YOLO
+   detecta una `person` — si no detecta a nadie (frame de acercamiento solo de la mano,
+   sin torso/cara visible) se usa el frame completo sin recortar, porque cortar el
+   frame completo arriesgaría recortar una mano levantada cerca del borde superior en
+   ese encuadre distinto.
+
+2. **Filtro de plausibilidad (`_is_plausible_hand_contour`, con `classify_contour` como
+   punto de entrada que lo aplica antes de clasificar).** Defensa de respaldo para
+   cuando la exclusión de ROI no alcanza (ej. sin `person` detectado, o piel visible
+   por debajo de la franja excluida). Rechaza por aspect ratio (`0.4`-`4.0`) y, sobre
+   todo, por un **techo de solidity (`0.95`)** — calibrado contra los contornos
+   sintéticos de los tests: los 4 gestos del catálogo caen en solidity ~0.69-0.88,
+   mientras que un óvalo liso tipo cara cae en ~0.99. Un dato importante que salió al
+   escribir el test pedido explícitamente por JD ("contorno tipo cara... no se
+   clasifica como ninguno de los 4 gestos"): un **círculo geométrico perfecto** (que es
+   como estaba modelado el fixture de "puño" hasta ahora, `cv2.circle`) es
+   indistinguible de una cara lisa por aspect ratio y solidity — ambos dan solidity
+   ~0.98+. Por eso se reemplazó el fixture `_fist_contour()` de los tests por una
+   silueta con textura leve (nudillos, solidity ~0.88, generada con una perturbación
+   sinusoidal del radio), más fiel a un puño real. **Esto es honesto también sobre el
+   límite del filtro:** distinguir un puño real de una cara real solo por geometría del
+   contorno es un problema genuinamente difícil — la defensa principal contra ese caso
+   específico es la exclusión de ROI (punto 1), no este filtro.
+
+3. **Estabilidad temporal (`GestureStabilizer`, `required_streak` configurable vía
+   `CVA_GESTURE_STABILITY_STREAK`, default 3).** Explica por sí sola gran parte del
+   síntoma que reportó JD ("puño_cerrado, palma_abierta, dedo_indice variando sin
+   patrón"): una máscara de piel ruidosa (cara mal segmentada, jitter de iluminación)
+   hace que el conteo de convexity defects varíe frame a frame, saltando entre
+   categorías — un gesto real y sostenido, en cambio, debería clasificar igual en
+   frames consecutivos. Exigir 3 detecciones seguidas iguales antes de loguear/mandar
+   filtra ese ruido con alta probabilidad, sin necesitar que sea geométricamente
+   perfecto.
+
+   **Interacción importante con el cooldown de 5s (pedido el 2026-09-17):** cada
+   detección *procesada* ya está ~5s separada de la anterior por el cooldown, así que
+   confirmar un gesto sostenido toma ahora **~15s** (3 × 5s), no ~1.2s como sería sin
+   cooldown. Esto entra en tensión directa con AC3 (<1.5s) — no se resolvió en este
+   ajuste porque el criterio de aceptación de JD para esta tarea es solo "sin falsos
+   positivos", no latencia. **Queda pendiente de decisión de JD:** si 15s resulta
+   demasiado lento en la validación real, la corrección es bajar `GESTURE_COOLDOWN_SECONDS`
+   y/o `GESTURE_STABILITY_STREAK` (ambos configurables por variable de entorno) — no
+   se debe ajustar ninguno de los dos a ciegas sin medir contra la cámara real primero.
+
+**Medida considerada y NO usada:** detección de cara con un clasificador Haar
+(`cv2.CascadeClassifier`) para recortarla explícitamente en vez de una fracción fija de
+la caja "persona". Es la opción técnicamente más precisa, pero el paquete
+`opencv-python` instalado en esta Pi **no trae empaquetados los XML de Haar cascades**
+(`cv2.data.haarcascades` apunta a un directorio vacío) — usarla requeriría bajar ese
+archivo por separado (un asset adicional que gestionar, aunque es oficial de OpenCV) y
+no fue necesario para cumplir lo pedido con las tres medidas de arriba. Queda anotada
+como mejora futura si la fracción fija (35%) no resulta suficiente en la validación
+real.
+
+#### Desarrollo
+
+- `cva_gesture_bridge/vision/detector.py`: nuevas constantes
+  `_MIN_PLAUSIBLE_ASPECT`/`_MAX_PLAUSIBLE_ASPECT`/`_MIN_PLAUSIBLE_SOLIDITY`/
+  `_MAX_PLAUSIBLE_SOLIDITY`/`_FACE_EXCLUSION_TOP_FRACTION`; funciones nuevas
+  `_is_plausible_hand_contour()` y `classify_contour()` (contorno → `GestureResult`
+  final, pasando por el filtro — punto de entrada testeable sin YOLO); clase nueva
+  `GestureStabilizer`. `GestureDetector.detect()` ahora recorta la franja de la cara
+  de la ROI antes de segmentar y usa `classify_contour()` en vez de llamar
+  `count_extended_fingers`/`classify_gesture` directo.
+- `cva_gesture_bridge/config.py`: nueva variable `GESTURE_STABILITY_STREAK`
+  (`CVA_GESTURE_STABILITY_STREAK`, default `3`).
+- `cva_gesture_bridge/main.py`: `_make_on_jpeg_frame` ahora mantiene un
+  `GestureStabilizer` por closure (mismo alcance global-al-proceso que
+  `last_processed_at`, ver nota ya documentada sobre el cooldown) y solo loguea
+  "Gesto detectado"/llama `send_line` cuando el stabilizer confirma. Las detecciones
+  crudas no confirmadas se loguean a nivel `DEBUG` como "Gesto candidato" para
+  seguir teniendo visibilidad durante pruebas.
+- `tests/test_detector.py`: se reemplazó `_fist_contour()` (antes un círculo
+  perfecto — indistinguible de una cara, ver arriba) por una silueta con textura
+  leve; se agregó `_face_contour()` (óvalo liso); 13 tests nuevos: el filtro de
+  plausibilidad rechaza la cara y acepta los 4 fixtures de gestos legítimos,
+  `classify_contour` end-to-end (cara → sin gesto, puño/palma siguen reconociéndose),
+  y 5 casos de `GestureStabilizer` (no confirma antes de la racha, confirma al
+  llegarla, se resetea si cambia el gesto o si aparece un frame sin gesto).
+- `tests/test_main.py`: los 4 tests de cooldown existentes ahora pasan
+  `stability_streak=1` explícito (para aislar el comportamiento del cooldown del de
+  estabilidad); 5 tests nuevos de la integración del stabilizer en el wiring real
+  (`cooldown_seconds=0.0` para aislarlo del cooldown): no se manda nada con una sola
+  detección, se manda una vez confirmado, y se resetea con cambio de gesto o ruido.
+- `pytest` completo: **43 passed, 0 failed** (30 previos + 13 nuevos).
+- Validación manual (smoke test con YOLO real, sin cámara — mismo patrón que el resto
+  de Fase 8): se corrió `GestureDetector.detect()` contra `zidane.jpg` (foto de
+  personas real, no una escena "solo cara" limpia). Resultado: sí devolvió un gesto
+  nominal (`puño_cerrado`, confianza 0.39) — **por debajo del umbral de confianza
+  (0.5)**, así que `format_line` igual no lo manda, pero esto NO es una confirmación
+  limpia del fix, porque la foto no reproduce la escena exacta del bug (JD probó
+  específicamente "sin ninguna mano frente a la cámara", probablemente con su propia
+  cara ocupando gran parte del encuadre real de la Pi, distinto a esta foto de stock
+  con múltiples personas y fondo complejo). **No se debe interpretar este smoke test
+  como que el bug ya está confirmado resuelto en producción.**
+
+#### Qué queda pendiente — validación real, no simulada
+
+Lo único que de verdad confirma este fix es la prueba que pidió JD:
+`journalctl -u cva-gesture-bridge.service -f` en la Pi, sin mano frente a la cámara,
+durante al menos 1 minuto, sin ninguna línea "Gesto detectado". Esta sesión no tiene
+cámara ni acceso físico a la Pi para generar esa escena — los tests unitarios (contorno
+sintético tipo cara, rechazado) dan confianza en que la lógica está bien encadenada,
+pero no reemplazan esa prueba en vivo. **Nada de este ajuste está commiteado ni
+desplegado** — sigue en el working tree. Para cerrar este punto hace falta: commitear,
+reiniciar el servicio (`systemctl restart cva-gesture-bridge.service`, necesita `sudo`
+interactivo que esta sesión no tiene), y que JD corra la prueba de `journalctl` y
+reporte aquí el resultado.
