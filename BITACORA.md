@@ -851,3 +851,86 @@ logging).
 **Pendiente:** commitear, redesplegar, que JD repita la prueba del puño sostenido, y
 traer aquí (o pegar) las líneas `[diag]` de esa corrida para diagnosticar la causa real
 antes de tocar ningún número más.
+
+---
+
+### Diagnóstico confirmado con datos reales — plan de remediación (2026-09-18)
+
+JD repitió la prueba dos veces más con el diagnóstico `[diag]` ya desplegado. **Datos
+reales, no hipótesis:**
+
+- Cerrando y reabriendo el cliente, acercando más la mano, **sí reconoció los 3 gestos
+  probados** (puño, palma abierta, pulgar) — con confianza real (0.48 a 1.00).
+- El log confirma que el proceso **nunca se cuelga ni deja de procesar** — sigue
+  corriendo un frame cada ~5s (cooldown) sin falta durante toda la sesión.
+- **Causa real:** la clasificación de dedos extendidos es inestable entre muestras
+  separadas 5s — la misma mano sostenida alterna entre `0 dedos` (puño), `2 dedos` y
+  `3 dedos` (ninguno de los 4 gestos) de una muestra a la siguiente. Ejemplo real del
+  log (sesión 16:53-16:55, todo con la misma mano en la misma zona del encuadre):
+  ```
+  16:53:42 puño_cerrado(0.89) → 16:53:47 sin persona → 16:53:52 sin persona →
+  16:53:57 puño_cerrado(0.77) → 16:54:02 dedo_pulgar(0.64) → 16:54:07 puño_cerrado(0.88)
+  → 16:54:12 puño_cerrado(0.88) → 16:54:17 dedo_pulgar(0.71) → 16:54:22 dedo_pulgar(0.69)
+  → 16:54:27 None(2 dedos) → 16:54:32 palma_abierta(0.48) →
+  16:54:38..16:55:03 None(2 dedos) x6 seguidas → 16:55:08 puño_cerrado(0.66)
+  ```
+  El `GestureStabilizer` exige 3 iguales **seguidas**; con esta inestabilidad esa
+  racha casi nunca se completa — de ahí el patrón real de JD: "funciona, luego después
+  de 15-20 eventos deja de responder" (no se cuelga, solo deja de *confirmar*).
+- **Dato nuevo:** los frames reales del cliente llegan a **320×240**, más bajo que los
+  640×480 usados en el benchmark de tamaño de modelo — a esa resolución el ruido de la
+  máscara de piel pesa proporcionalmente más sobre el conteo de convexity defects.
+
+#### Plan de remediación (aprobado por JD, "implementa las dos")
+
+- [x] **Reducir el ruido de conteo de dedos**: subir `_MIN_DEFECT_DEPTH_RATIO` (0.15 →
+      más alto) y agrandar el kernel morfológico de `segment_hand()` — para que jitter
+      normal de la máscara de piel no cruce el umbral de "dedo extra".
+- [x] **Relajar el `GestureStabilizer`**: de "N iguales exactas seguidas" a una
+      ventana deslizante tolerante a 1 fallo (ej. "2 de las últimas 3"), que hubiera
+      confirmado varias de las rachas de 2 vistas en el log de arriba.
+- [x] Actualizar tests afectados (fixtures de `test_detector.py` calibrados contra el
+      nuevo umbral de profundidad; tests de `GestureStabilizer` reescritos para la
+      nueva semántica de ventana).
+- [ ] Redesplegar (con el diagnóstico `[diag]` todavía activo) y que JD repita la
+      prueba de los 3 gestos — medir cuántos de los eventos candidatos terminan
+      confirmándose, no solo si al final hubo algún "Gesto detectado". **Pendiente.**
+- [ ] Una vez validado, revertir el logging `[diag]` de INFO a DEBUG (es temporal,
+      ver commit `8f8b5aa`). **Pendiente.**
+
+#### Implementación
+
+- `cva_gesture_bridge/vision/detector.py`:
+  - `_MIN_DEFECT_DEPTH_RATIO`: `0.15` → `0.20`. Calibrado con margen contra
+    `tests/test_detector.py` (el defect más débil de la palma abierta sintética queda
+    en ~0.23-0.27, por encima del nuevo umbral).
+  - Kernel morfológico de `segment_hand()`: `(5,5)` → `(7,7)` — más suavizado de la
+    máscara de piel a la resolución real (320x240).
+  - `GestureStabilizer` reescrito por completo: de una racha exacta
+    (`required_streak`, `_streak`/`_last_gesture`) a una ventana deslizante
+    (`window_size`, `min_matches`, `collections.deque`). `observe()` ahora confirma si
+    el gesto aparece `min_matches` veces dentro de las últimas `window_size`
+    detecciones, sin importar el orden ni si hay otro gesto de por medio.
+- `cva_gesture_bridge/config.py`: `GESTURE_STABILITY_STREAK` reemplazado por
+  `GESTURE_STABILITY_WINDOW` (`CVA_GESTURE_STABILITY_WINDOW`, default `3`) y
+  `GESTURE_STABILITY_MIN_MATCHES` (`CVA_GESTURE_STABILITY_MIN_MATCHES`, default `2`)
+  — "2 de las últimas 3" por defecto.
+- `cva_gesture_bridge/main.py`: `_make_on_jpeg_frame` recibe los dos parámetros nuevos
+  en vez de `stability_streak`; instancia `GestureStabilizer(window_size=...,
+  min_matches=...)`.
+- Tests:
+  - `tests/test_detector.py`: `_open_palm_contour` con `valley_y=155` (antes 140) para
+    tener margen real contra el nuevo umbral de profundidad; los 4 tests de
+    `GestureStabilizer` con racha exacta se reemplazaron por 5 con la nueva
+    semántica de ventana — incluyendo uno que reproduce exactamente el patrón real
+    visto en producción ("2 de 3, con un gesto distinto de por medio, sí confirma").
+  - `tests/test_main.py`: los 4 tests de cooldown ahora usan
+    `stability_window=1, stability_min_matches=1` (equivalente al viejo streak=1,
+    para seguir aislando el cooldown); los tests de estabilidad se reescribieron para
+    la ventana, con el mismo caso real reproducido a nivel de wiring completo.
+  - `pytest` completo: **46 passed, 0 failed** (43 previos, +3 netos tras el rediseño).
+
+**No se pudo re-verificar contra fotos/video reales todavía en esta sesión** — falta
+commitear, redesplegar, y que JD repita la prueba de los 3 gestos con el diagnóstico
+`[diag]` (todavía activo) para confirmar con datos si esto resuelve el patrón real
+documentado arriba.

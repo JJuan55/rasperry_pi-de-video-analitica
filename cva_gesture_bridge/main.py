@@ -30,14 +30,19 @@ def _make_watchdog() -> Watchdog:
     return Watchdog(config.WATCHDOG_TIMEOUT_SECONDS, _on_watchdog_timeout)
 
 
-def _make_on_jpeg_frame(detector: GestureDetector, cooldown_seconds: float, stability_streak: int):
+def _make_on_jpeg_frame(
+    detector: GestureDetector,
+    cooldown_seconds: float,
+    stability_window: int,
+    stability_min_matches: int,
+):
     # last_processed_at y stabilizer viven en este closure, creado una sola vez por
-    # arranque del bridge — tanto el cooldown como la racha de estabilidad son
+    # arranque del bridge — tanto el cooldown como la ventana de estabilidad son
     # globales al proceso, no por conexión (ver nota en BITACORA.md "Fase 8": para el
     # uso real de este proyecto, una sola conexión persistente por sesión, equivale a
     # cooldown/estabilidad por sesión).
     last_processed_at = None
-    stabilizer = GestureStabilizer(required_streak=stability_streak)
+    stabilizer = GestureStabilizer(window_size=stability_window, min_matches=stability_min_matches)
 
     async def on_jpeg_frame(jpeg_bytes: bytes, writer: asyncio.StreamWriter) -> None:
         nonlocal last_processed_at
@@ -57,7 +62,9 @@ def _make_on_jpeg_frame(detector: GestureDetector, cooldown_seconds: float, stab
 
         # Fix de falsos positivos sin mano presente (2026-09-18, ver BITACORA.md "Fase
         # 8"): un gesto crudo de un solo frame no se loguea como "Gesto detectado" ni
-        # se manda al cliente hasta que se repite `stability_streak` veces seguidas.
+        # se manda al cliente hasta que aparece al menos `stability_min_matches` veces
+        # dentro de las últimas `stability_window` detecciones (ventana deslizante,
+        # no una racha exacta — ver GestureStabilizer).
         confirmed_gesture = stabilizer.observe(result.gesture)
 
         # DIAGNÓSTICO TEMPORAL (2026-09-18, ver BITACORA.md "Fase 8"): a propósito en
@@ -105,7 +112,10 @@ async def run() -> None:
         config.BRIDGE_PORT,
         watchdog_factory=_make_watchdog,
         on_jpeg_frame=_make_on_jpeg_frame(
-            detector, config.GESTURE_COOLDOWN_SECONDS, config.GESTURE_STABILITY_STREAK
+            detector,
+            config.GESTURE_COOLDOWN_SECONDS,
+            config.GESTURE_STABILITY_WINDOW,
+            config.GESTURE_STABILITY_MIN_MATCHES,
         ),
     )
     await server.start()

@@ -30,12 +30,20 @@ MIN_CONFIDENCE = float(os.environ.get("CVA_MIN_CONFIDENCE", "0.5"))
 # para no correr el detector en cada frame (~2.5 fps real). Ver BITACORA.md "Fase 8".
 GESTURE_COOLDOWN_SECONDS = float(os.environ.get("CVA_GESTURE_COOLDOWN_SECONDS", "5"))
 
-# Cuántas detecciones *procesadas* consecutivas deben coincidir en el mismo gesto antes
-# de confirmarlo (loguear "Gesto detectado" y mandar send_line) — fix de falsos
-# positivos sin mano presente (2026-09-18, ver BITACORA.md "Fase 8"). Combinado con el
-# cooldown de arriba, cada detección procesada está ~GESTURE_COOLDOWN_SECONDS aparte,
-# así que confirmar toma aproximadamente GESTURE_STABILITY_STREAK *
-# GESTURE_COOLDOWN_SECONDS segundos de gesto sostenido — si eso resulta demasiado
-# lento en la validación real de AC3 (<1.5s), el ajuste es bajar uno de los dos, no
-# ambos a la vez sin medir.
-GESTURE_STABILITY_STREAK = int(os.environ.get("CVA_GESTURE_STABILITY_STREAK", "3"))
+# Ventana deslizante de estabilidad: un gesto se confirma (loguea "Gesto detectado" y
+# manda send_line) si aparece al menos GESTURE_STABILITY_MIN_MATCHES veces dentro de
+# las últimas GESTURE_STABILITY_WINDOW detecciones *procesadas* — fix de falsos
+# positivos sin mano presente (2026-09-18, ver BITACORA.md "Fase 8").
+#
+# Rediseñado el mismo día (todavía dentro de Fase 8): la primera versión exigía una
+# racha EXACTA de N seguidas, pero los datos reales mostraron que una mano real
+# sostenida quieta igual varía de una muestra a la siguiente (ruido normal de la
+# máscara de piel) — con "3 seguidas exactas" la confirmación casi nunca se
+# completaba. Con "2 de las últimas 3" (default) se tolera 1 muestra ruidosa.
+#
+# Cada detección procesada está ~GESTURE_COOLDOWN_SECONDS aparte, así que confirmar
+# toma aproximadamente GESTURE_STABILITY_WINDOW * GESTURE_COOLDOWN_SECONDS segundos de
+# gesto sostenido en el peor caso — si eso resulta demasiado lento en la validación
+# real de AC3 (<1.5s), el ajuste es bajar el cooldown, no estos dos a la vez sin medir.
+GESTURE_STABILITY_WINDOW = int(os.environ.get("CVA_GESTURE_STABILITY_WINDOW", "3"))
+GESTURE_STABILITY_MIN_MATCHES = int(os.environ.get("CVA_GESTURE_STABILITY_MIN_MATCHES", "2"))

@@ -74,11 +74,15 @@ def _open_palm_contour() -> np.ndarray:
     palma abierta. Las puntas están a alturas distintas a propósito: si quedaran
     alineadas, el convex hull las trata como colineales y solo reporta un defect para
     todo el borde superior en vez de uno por valle (esto se descubrió al escribir este
-    test contra un rectángulo con 5 dedos parejos, que fallaba con solo 2-3 defects)."""
+    test contra un rectángulo con 5 dedos parejos, que fallaba con solo 2-3 defects).
+    `valley_y` bajado de 140 a 155 el 2026-09-18 (junto con subir
+    `_MIN_DEFECT_DEPTH_RATIO` a 0.20 en detector.py): con 140 el defect más débil
+    quedaba a 0.198, muy pegado al nuevo umbral — con 155 queda en ~0.23, con margen
+    real."""
     tips_x = [50, 85, 120, 155, 190]
     tips_y = [60, 25, 15, 30, 70]
     valley_x = [68, 103, 138, 173]
-    valley_y = 140
+    valley_y = 155
 
     points = [(20, 220), (30, 150)]
     for i, (tx, ty) in enumerate(zip(tips_x, tips_y)):
@@ -189,34 +193,50 @@ def test_classify_contour_still_recognizes_legitimate_open_palm():
     assert result.gesture == GESTURE_PALMA_ABIERTA
 
 
-# --- GestureStabilizer (estabilidad temporal, fix de falsos positivos) ---
+# --- GestureStabilizer (ventana deslizante, rediseñado el 2026-09-18 tras evidencia
+# real de que una racha exacta casi nunca se completaba con una mano real sostenida —
+# ver BITACORA.md "Fase 8") ---
 
 
-def test_stabilizer_does_not_confirm_before_required_streak():
-    stabilizer = GestureStabilizer(required_streak=3)
+def test_stabilizer_does_not_confirm_with_a_single_observation():
+    stabilizer = GestureStabilizer(window_size=3, min_matches=2)
     assert stabilizer.observe(GESTURE_PUÑO_CERRADO) is None
-    assert stabilizer.observe(GESTURE_PUÑO_CERRADO) is None
 
 
-def test_stabilizer_confirms_once_streak_is_reached():
-    stabilizer = GestureStabilizer(required_streak=3)
+def test_stabilizer_confirms_when_min_matches_reached_even_without_exact_streak():
+    # 2 de las últimas 3 alcanzan, aunque la del medio sea otro gesto — este es
+    # exactamente el patrón real que antes nunca confirmaba.
+    stabilizer = GestureStabilizer(window_size=3, min_matches=2)
     stabilizer.observe(GESTURE_PUÑO_CERRADO)
+    stabilizer.observe(GESTURE_DEDO_PULGAR)  # ruido de un frame, ya no rompe todo
+    assert stabilizer.observe(GESTURE_PUÑO_CERRADO) == GESTURE_PUÑO_CERRADO
+
+
+def test_stabilizer_confirms_on_two_consecutive_matches():
+    stabilizer = GestureStabilizer(window_size=3, min_matches=2)
     stabilizer.observe(GESTURE_PUÑO_CERRADO)
     assert stabilizer.observe(GESTURE_PUÑO_CERRADO) == GESTURE_PUÑO_CERRADO
 
 
-def test_stabilizer_resets_streak_when_gesture_changes():
-    stabilizer = GestureStabilizer(required_streak=3)
+def test_stabilizer_does_not_confirm_a_gesture_seen_only_once_in_the_window():
+    stabilizer = GestureStabilizer(window_size=3, min_matches=2)
     stabilizer.observe(GESTURE_PUÑO_CERRADO)
-    stabilizer.observe(GESTURE_PUÑO_CERRADO)
-    stabilizer.observe(GESTURE_PALMA_ABIERTA)  # cambia justo antes de confirmar
-    assert stabilizer.observe(GESTURE_PALMA_ABIERTA) is None  # streak=2 del nuevo gesto
+    stabilizer.observe(GESTURE_DEDO_PULGAR)
+    assert stabilizer.observe(GESTURE_PALMA_ABIERTA) is None  # los 3 son distintos
 
 
-def test_stabilizer_resets_streak_on_none():
-    stabilizer = GestureStabilizer(required_streak=3)
+def test_stabilizer_none_observation_does_not_confirm_but_stays_in_the_window():
+    stabilizer = GestureStabilizer(window_size=3, min_matches=2)
     stabilizer.observe(GESTURE_PUÑO_CERRADO)
+    assert stabilizer.observe(None) is None  # ruido de un frame sin gesto
+    # el puño_cerrado anterior sigue en la ventana (tamaño 3) -> esta es la 2da
+    assert stabilizer.observe(GESTURE_PUÑO_CERRADO) == GESTURE_PUÑO_CERRADO
+
+
+def test_stabilizer_window_slides_and_forgets_old_observations():
+    stabilizer = GestureStabilizer(window_size=3, min_matches=2)
     stabilizer.observe(GESTURE_PUÑO_CERRADO)
-    stabilizer.observe(None)  # ruido de un frame sin gesto
-    stabilizer.observe(GESTURE_PUÑO_CERRADO)
-    assert stabilizer.observe(GESTURE_PUÑO_CERRADO) is None  # solo streak=2 otra vez
+    stabilizer.observe(GESTURE_PALMA_ABIERTA)
+    stabilizer.observe(GESTURE_PALMA_ABIERTA)  # ventana: [puño, palma, palma]
+    # el puño_cerrado original ya salió de la ventana (maxlen=3) -> no cuenta
+    assert stabilizer.observe(GESTURE_PUÑO_CERRADO) is None

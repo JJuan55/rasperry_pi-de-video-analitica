@@ -30,6 +30,7 @@ nada.
 
 import logging
 import math
+from collections import deque
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
@@ -54,7 +55,14 @@ _SKIN_HSV_LOW = np.array([0, 30, 60], dtype=np.uint8)
 _SKIN_HSV_HIGH = np.array([20, 150, 255], dtype=np.uint8)
 
 _MIN_CONTOUR_AREA = 1500  # px² — descarta ruido pequeño en la máscara de piel
-_MIN_DEFECT_DEPTH_RATIO = 0.15  # proporción de la diagonal del bounding box
+# Subido de 0.15 a 0.20 el 2026-09-18 (ver BITACORA.md "Fase 8", diagnóstico con datos
+# reales): a la resolución real del cliente (320x240, más baja que los 640x480 usados
+# en el benchmark), el mismo puño sostenido cruzaba este umbral de un frame a otro por
+# jitter normal de la máscara de piel, alternando entre "0 dedos" y "2-3 dedos" sin que
+# la mano se moviera. Calibrado con margen contra los fixtures sintéticos de
+# tests/test_detector.py (el defect más débil de la palma abierta da ~0.23-0.27, por
+# encima de este umbral).
+_MIN_DEFECT_DEPTH_RATIO = 0.20  # proporción de la diagonal del bounding box
 _SINGLE_FINGER_ASPECT_THRESHOLD = 1.4  # alto/ancho mínimo para distinguir 1 dedo de puño
 _SINGLE_FINGER_ASPECT_CONFIDENT = 2.2  # alto/ancho a partir del cual la confianza satura
 
@@ -247,31 +255,33 @@ def classify_contour(contour: np.ndarray) -> GestureResult:
 
 
 class GestureStabilizer:
-    """Exige que el mismo gesto se repita en `required_streak` detecciones
-    consecutivas antes de confirmarlo — filtra ruido de un solo frame (p.ej. un
-    contorno espurio de un frame aislado) para que no dispare una línea real hacia el
-    cliente. Ver BITACORA.md "Fase 8", fix de falsos positivos sin mano presente."""
+    """Confirma un gesto si aparece al menos `min_matches` veces dentro de las
+    últimas `window_size` detecciones crudas — filtra ruido de un frame aislado sin
+    exigir que sea el mismo gesto en TODAS las muestras seguidas.
 
-    def __init__(self, required_streak: int = 3) -> None:
-        self._required_streak = required_streak
-        self._last_gesture: Optional[str] = None
-        self._streak = 0
+    Rediseñado el 2026-09-18 (ver BITACORA.md "Fase 8"): la versión anterior exigía
+    una racha exacta ("N iguales seguidas"), pero los datos reales mostraron que la
+    clasificación de una mano real sostenida quieta igual varía de una muestra a la
+    siguiente (ruido normal de la máscara de piel) — una sola muestra distinta bastaba
+    para reiniciar la racha a cero y la confirmación casi nunca se completaba. Una
+    ventana deslizante tolera esa clase de ruido: con `window_size=3,
+    min_matches=2` (default), 2 de las últimas 3 detecciones iguales ya confirman,
+    en vez de exigir que las 3 coincidan exactamente."""
+
+    def __init__(self, window_size: int = 3, min_matches: int = 2) -> None:
+        self._window_size = window_size
+        self._min_matches = min_matches
+        self._history: deque = deque(maxlen=window_size)
 
     def observe(self, gesture: Optional[str]) -> Optional[str]:
-        """Alimenta una detección cruda; devuelve el gesto ya confirmado (repetido
-        `required_streak` veces seguidas) o `None` si todavía no se confirma."""
+        """Alimenta una detección cruda; devuelve el gesto confirmado (si aparece al
+        menos `min_matches` veces en la ventana, incluyendo esta detección) o `None`."""
+        self._history.append(gesture)
         if gesture is None:
-            self._last_gesture = None
-            self._streak = 0
             return None
 
-        if gesture == self._last_gesture:
-            self._streak += 1
-        else:
-            self._last_gesture = gesture
-            self._streak = 1
-
-        return gesture if self._streak >= self._required_streak else None
+        matches = sum(1 for g in self._history if g == gesture)
+        return gesture if matches >= self._min_matches else None
 
 
 def segment_hand(frame_bgr: np.ndarray) -> Optional[np.ndarray]:
@@ -279,7 +289,11 @@ def segment_hand(frame_bgr: np.ndarray) -> Optional[np.ndarray]:
     hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
     mask = cv2.inRange(hsv, _SKIN_HSV_LOW, _SKIN_HSV_HIGH)
 
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    # Subido de (5,5) a (7,7) el 2026-09-18 (ver BITACORA.md "Fase 8"): a la
+    # resolución real de 320x240 el kernel chico dejaba pasar más ruido dentado en el
+    # borde de la máscara del esperado, contribuyendo a la inestabilidad del conteo de
+    # dedos entre frames (junto con el ajuste de _MIN_DEFECT_DEPTH_RATIO de arriba).
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
 
