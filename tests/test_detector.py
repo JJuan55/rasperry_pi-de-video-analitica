@@ -22,6 +22,7 @@ from cva_gesture_bridge.vision.detector import (
     GESTURE_PUÑO_CERRADO,
     GestureResult,
     GestureStabilizer,
+    MotionGate,
     _is_plausible_hand_contour,
     classify_contour,
     classify_gesture,
@@ -240,3 +241,54 @@ def test_stabilizer_window_slides_and_forgets_old_observations():
     stabilizer.observe(GESTURE_PALMA_ABIERTA)  # ventana: [puño, palma, palma]
     # el puño_cerrado original ya salió de la ventana (maxlen=3) -> no cuenta
     assert stabilizer.observe(GESTURE_PUÑO_CERRADO) is None
+
+
+# --- MotionGate (segundo fix de falsos positivos: torso confundido con puño,
+# 2026-09-18, ver BITACORA.md "Fase 8") — frames sintéticos de color sólido, no fotos ---
+
+
+def _solid_frame(color_bgr, shape=(100, 100)):
+    frame = np.zeros((*shape, 3), dtype=np.uint8)
+    frame[:] = color_bgr
+    return frame
+
+
+def test_motion_gate_first_frame_establishes_background_and_returns_none():
+    gate = MotionGate()
+    frame = _solid_frame((120, 120, 120))
+    assert gate.update_and_get_motion_mask(frame) is None
+
+
+def test_motion_gate_unchanged_scene_reports_no_motion():
+    gate = MotionGate()
+    frame = _solid_frame((120, 120, 120))
+    gate.update_and_get_motion_mask(frame)  # establece el fondo
+
+    motion_mask = gate.update_and_get_motion_mask(frame)  # mismo frame otra vez
+
+    assert motion_mask is not None
+    assert np.count_nonzero(motion_mask) == 0
+
+
+def test_motion_gate_flags_a_region_that_changed():
+    gate = MotionGate()
+    background = _solid_frame((120, 120, 120))
+    gate.update_and_get_motion_mask(background)  # establece el fondo
+
+    changed = background.copy()
+    changed[30:70, 30:70] = (0, 200, 0)  # un parche que "aparece" — mano nueva, no fondo
+    motion_mask = gate.update_and_get_motion_mask(changed)
+
+    assert motion_mask is not None
+    assert motion_mask[50, 50] == 255  # el centro del parche sí se marca
+    assert motion_mask[5, 5] == 0  # una esquina sin cambios no se marca
+
+
+def test_motion_gate_reset_forgets_the_learned_background():
+    gate = MotionGate()
+    gate.update_and_get_motion_mask(_solid_frame((120, 120, 120)))  # establece el fondo
+    gate.reset()
+
+    # Tras el reset, el siguiente frame vuelve a comportarse como el primero: solo
+    # establece el fondo, no hay máscara todavía.
+    assert gate.update_and_get_motion_mask(_solid_frame((200, 50, 50))) is None

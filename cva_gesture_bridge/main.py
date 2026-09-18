@@ -101,6 +101,11 @@ def _warm_up(detector: GestureDetector) -> None:
     ok, jpeg_bytes = cv2.imencode(".jpg", blank_frame)
     if ok:
         detector.detect(jpeg_bytes.tobytes())
+        # El frame en negro del warmup no es la escena real — sin este reset,
+        # MotionGate lo aprendería como "fondo" y el primer frame real completo
+        # aparecería como "movimiento" en todas partes (ver BITACORA.md "Fase 8",
+        # segundo fix de falsos positivos).
+        detector.reset_motion_background()
         logger.info("Detector de gestos precalentado (warmup de arranque)")
 
 

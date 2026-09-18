@@ -934,3 +934,87 @@ reales, no hipótesis:**
 commitear, redesplegar, y que JD repita la prueba de los 3 gestos con el diagnóstico
 `[diag]` (todavía activo) para confirmar con datos si esto resuelve el patrón real
 documentado arriba.
+
+---
+
+### Segundo fix de falsos positivos: torso confundido con puño (2026-09-18)
+
+JD redesplegó y probó de nuevo. Resultado inesperado: **sin ninguna mano frente a la
+cámara, viendo solo su torso hacia arriba y el fondo**, el servicio empezó a detectar
+`puño_cerrado` con confianza alta (0.68-0.94), de forma sostenida.
+
+**Causa confirmada con datos del `[diag]`:** con JD cerca de la cámara, YOLO detecta la
+caja "persona" cubriendo casi todo el frame (320x240) — ej. `bbox=(2, 2, 275, 239)`. El
+recorte del 15% superior (pensado para la cara) deja el resto: básicamente todo el
+pecho/torso. `segment_hand()` encuentra ahí un contorno de piel real (área ~11000-15000,
+aspect ~0.6-1.4, solidity ~0.7-0.9) que pasa el filtro de plausibilidad y se clasifica
+como puño_cerrado con confianza alta.
+
+**Por qué esta vez no es un ajuste de número:** se comparó el área de este torso falso
+positivo contra las áreas de puños reales confirmados ayer (misma resolución) —
+**se solapan casi exactamente** (~18% del área de la caja "persona" en ambos casos).
+Aspect ratio y solidity también se solapan. Geométricamente estático, un torso visible
+de cerca y un puño real son casi indistinguibles con las señales usadas hasta ahora
+(aspect, solidity, área) — subir el umbral de profundidad de defects y relajar el
+`GestureStabilizer` (que sí ayudaron a detectar gestos reales) también hicieron más
+fácil confirmar esto.
+
+**Decisión (JD, preguntado explícitamente entre 3 opciones):** agregar **detección de
+movimiento** — un modelo de fondo (promedio móvil exponencial) del frame completo; solo
+se considera "mano" la piel que cambió recientemente respecto a ese fondo, no la que
+siempre está en cuadro (torso, cuello). Descartadas: (a) volver a endurecer los
+parámetros de hoy (ya sabíamos que eso dejaba de detectar gestos reales sostenidos), (b)
+acotar la ROI a un recuadro central fijo (asume una posición de mano consistente, más
+frágil).
+
+#### Riesgo conocido de esta implementación (documentado antes de escribir código)
+
+Un modelo de fondo por definición "olvida" lo que deja de cambiar — si JD sostiene el
+mismo gesto sin moverse muchos minutos seguidos, el fondo eventualmente podría
+adaptarse a la mano y dejar de marcarla como "movimiento", reintroduciendo el síntoma
+de "deja de confirmar" que se acaba de arreglar con el `GestureStabilizer`. Se mitiga
+con una tasa de adaptación lenta (`alpha` bajo) para que sobreviva la ventana de
+confirmación (10-15s) y la prueba de 30s ya usada — pero una sesión real de varios
+minutos sosteniendo el mismo gesto sin pausa es un caso no cubierto todavía. Si eso
+pasa en la validación real, la solución correcta es pausar la actualización del fondo
+mientras hay un gesto confirmado activo (no implementado en esta primera versión, para
+no aumentar más el alcance de este ajuste puntual).
+
+#### Implementación
+
+- `cva_gesture_bridge/vision/detector.py`: clase nueva `MotionGate` — modelo de fondo
+  por promedio móvil exponencial (`alpha=0.08`) sobre el **frame completo** (no la
+  ROI, para que el fondo sea consistente aunque la caja "persona" de YOLO se mueva de
+  un frame a otro); `update_and_get_motion_mask()` devuelve la máscara de píxeles que
+  cambiaron respecto al fondo, o `None` mientras el fondo no está establecido (primer
+  frame). `reset()` para olvidar el fondo aprendido explícitamente.
+  - `segment_hand()` ahora acepta `motion_mask` opcional — si se pasa, se hace AND con
+    la máscara de piel antes de buscar contornos (piel estática queda descartada).
+  - `GestureDetector` mantiene un `MotionGate` propio (`self._motion_gate`), nuevo
+    método público `reset_motion_background()`. `detect()` calcula la máscara de
+    movimiento sobre el frame completo, la recorta a la misma ROI (con exclusión de
+    franja superior) antes de pasarla a `segment_hand()`. Si el fondo todavía no está
+    establecido, `detect()` devuelve directamente "sin gesto" — no confía en el primer
+    frame de una sesión.
+- `cva_gesture_bridge/main.py`: `_warm_up()` llama a
+  `detector.reset_motion_background()` después de correr el detect() de warmup — el
+  frame en negro del warmup no es la escena real, no debe quedar como "fondo aprendido".
+- Tests nuevos en `tests/test_detector.py` (4 casos, con frames sintéticos de color
+  sólido — sin cámara): primer frame establece fondo y no da máscara; el mismo frame
+  repetido dos veces no marca ningún píxel como movimiento; un parche de color
+  distinto sí se marca (centro del parche = 255, esquina sin cambios = 0); `reset()`
+  hace que el siguiente frame vuelva a comportarse como el primero.
+- `pytest` completo: **50 passed, 0 failed** (46 previos + 4 nuevos de `MotionGate`).
+- Smoke test manual (sin cámara real, mismo patrón que el resto de Fase 8): se corrió
+  `GestureDetector.detect()` tres veces seguidas contra el mismo frame estático
+  (`zidane.jpg`, simulando una escena sin cambios como el torso quieto de JD) — las
+  tres veces devolvió `gesture=None`. Antes de este fix, una imagen estática con piel
+  visible sí producía falsos positivos (torso → puño_cerrado); ahora no.
+
+**Pendiente:** commitear, redesplegar (el diagnóstico `[diag]` sigue activo), y que JD
+repita ambas pruebas: (a) sin mano, torso/fondo visible, al menos 1 minuto sin ningún
+"Gesto detectado"; (b) sosteniendo puño/palma/pulgar, que sigan confirmándose como
+antes de este segundo fix. Si (b) falla porque el gesto real no se distingue lo
+suficiente del fondo que tenía la mano antes de levantarla, es la señal de que
+`_MOTION_BACKGROUND_ALPHA`/`_MOTION_DIFF_THRESHOLD` necesitan ajuste con datos reales,
+no a ciegas.

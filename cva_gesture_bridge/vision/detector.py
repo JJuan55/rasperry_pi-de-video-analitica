@@ -21,11 +21,17 @@ más grande dentro de la región "persona" de YOLO. Tres defensas, de la más a 
 preventiva: (1) la ROI de segmentación excluye la franja superior de la caja
 "persona" (`_FACE_EXCLUSION_TOP_FRACTION`, ahí suele estar la cara); (2)
 `_is_plausible_hand_contour()` rechaza el contorno segmentado si su aspect ratio o
-solidity caen fuera de un rango plausible para una mano — una cara es notablemente más
-lisa/convexa (solidity muy alta) que cualquiera de los 4 gestos del catálogo; (3)
-`GestureStabilizer` (usado en `main.py`) exige que el mismo gesto se repita varios
-frames seguidos antes de emitirlo, para que ruido puntual de un solo frame no dispare
-nada.
+solidity caen fuera de un rango plausible para una mano; (3) `GestureStabilizer`
+(usado en `main.py`) exige que el gesto se repita dentro de una ventana de frames
+antes de emitirlo, para que ruido puntual de un solo frame no dispare nada.
+
+Segundo fix de falsos positivos (mismo día, ver BITACORA.md): con la persona cerca de
+la cámara, la caja "persona" de YOLO puede cubrir casi todo el frame — la franja
+excluida (1) ya no alcanza para sacar el torso/pecho, que es piel real, geométricamente
+casi indistinguible de un puño real (área/aspect/solidity se solapan). `MotionGate`
+mantiene un modelo de fondo del frame completo y solo deja pasar a segmentación la piel
+que cambió recientemente respecto a ese fondo — piel que siempre está en cuadro
+(torso, cuello) queda absorbida como fondo y no se considera candidata a mano.
 """
 
 import logging
@@ -90,6 +96,60 @@ _MAX_PLAUSIBLE_SOLIDITY = 0.95
 # si 0.15 resulta insuficiente contra falsos positivos, o todavía corta manos reales,
 # hay que volver a medir, no adivinar otro número.
 _FACE_EXCLUSION_TOP_FRACTION = 0.15
+
+# MotionGate (segundo fix de falsos positivos, 2026-09-18 — ver BITACORA.md "Fase 8"):
+# alpha bajo a propósito, para que un gesto sostenido varios segundos no se "absorba"
+# como fondo antes de que el GestureStabilizer alcance a confirmarlo (ventana de
+# confirmación ~10-15s con la configuración por defecto). Riesgo conocido y documentado
+# en BITACORA.md: una sesión sosteniendo el mismo gesto varios *minutos* sin pausa
+# todavía podría acabar absorbida — no cubierto en esta primera versión.
+_MOTION_BACKGROUND_ALPHA = 0.08
+_MOTION_DIFF_THRESHOLD = 25  # diferencia de intensidad (0-255) para contar como "cambió"
+_MOTION_MASK_DILATE_KERNEL_SIZE = 9
+
+
+class MotionGate:
+    """Modelo de fondo (promedio móvil exponencial) del frame completo — devuelve una
+    máscara de qué píxeles cambiaron recientemente respecto a ese fondo, para no
+    confundir piel que siempre está en cuadro (torso, cuello) con una mano que acaba
+    de aparecer. Ver nota de módulo, "Segundo fix de falsos positivos"."""
+
+    def __init__(
+        self,
+        alpha: float = _MOTION_BACKGROUND_ALPHA,
+        diff_threshold: int = _MOTION_DIFF_THRESHOLD,
+        dilate_kernel_size: int = _MOTION_MASK_DILATE_KERNEL_SIZE,
+    ) -> None:
+        self._alpha = alpha
+        self._diff_threshold = diff_threshold
+        self._dilate_kernel = cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE, (dilate_kernel_size, dilate_kernel_size)
+        )
+        self._background: Optional[np.ndarray] = None
+
+    def reset(self) -> None:
+        """Olvida el fondo aprendido — usar tras un frame que no es representativo de
+        la escena real (p.ej. el frame en negro del warmup de arranque)."""
+        self._background = None
+
+    def update_and_get_motion_mask(self, frame_bgr: np.ndarray) -> Optional[np.ndarray]:
+        """Alimenta un frame nuevo; devuelve la máscara de movimiento, o `None` si el
+        fondo todavía no está establecido (primer frame tras `reset()`/arranque, o
+        cambió el tamaño del frame) — en ese caso no hay que confiar en ninguna región
+        como "mano" todavía."""
+        frame_f = frame_bgr.astype(np.float32)
+
+        if self._background is None or self._background.shape != frame_f.shape:
+            self._background = frame_f
+            return None
+
+        prev_background = self._background.astype(np.uint8)
+        diff_gray = cv2.cvtColor(cv2.absdiff(frame_bgr, prev_background), cv2.COLOR_BGR2GRAY)
+        _, motion_mask = cv2.threshold(diff_gray, self._diff_threshold, 255, cv2.THRESH_BINARY)
+        motion_mask = cv2.dilate(motion_mask, self._dilate_kernel)
+
+        self._background = self._alpha * frame_f + (1 - self._alpha) * self._background
+        return motion_mask
 
 
 @dataclass
@@ -284,10 +344,17 @@ class GestureStabilizer:
         return gesture if matches >= self._min_matches else None
 
 
-def segment_hand(frame_bgr: np.ndarray) -> Optional[np.ndarray]:
-    """Encuentra el contorno más grande que parece piel dentro del frame (o ROI)."""
+def segment_hand(frame_bgr: np.ndarray, motion_mask: Optional[np.ndarray] = None) -> Optional[np.ndarray]:
+    """Encuentra el contorno más grande que parece piel dentro del frame (o ROI).
+
+    `motion_mask` (segundo fix de falsos positivos, ver nota de módulo): si se pasa,
+    solo se considera piel que además cayó dentro de esa máscara — piel estática
+    (torso, cuello) queda descartada aunque sea del color correcto."""
     hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
     mask = cv2.inRange(hsv, _SKIN_HSV_LOW, _SKIN_HSV_HIGH)
+
+    if motion_mask is not None:
+        mask = cv2.bitwise_and(mask, motion_mask)
 
     # Subido de (5,5) a (7,7) el 2026-09-18 (ver BITACORA.md "Fase 8"): a la
     # resolución real de 320x240 el kernel chico dejaba pasar más ruido dentado en el
@@ -327,6 +394,12 @@ class GestureDetector:
 
         self._model = YOLO(model_path)
         self._min_confidence = min_confidence
+        self._motion_gate = MotionGate()
+
+    def reset_motion_background(self) -> None:
+        """Ver `MotionGate.reset()` — usar tras un frame no representativo de la
+        escena real (p.ej. el warmup de arranque con un frame en negro)."""
+        self._motion_gate.reset()
 
     def _find_person_roi(self, frame_bgr: np.ndarray) -> Optional[Tuple[int, int, int, int]]:
         results = self._model.predict(
@@ -360,6 +433,15 @@ class GestureDetector:
         frame_h, frame_w = frame.shape[:2]
         logger.info("[diag] frame decodificado: %dx%d", frame_w, frame_h)
 
+        # Segundo fix de falsos positivos (2026-09-18, ver nota de módulo): el modelo
+        # de fondo se actualiza sobre el frame completo, en la misma escala/coordenadas
+        # cada vez, antes de recortar la ROI — así el fondo es consistente aunque la
+        # caja "persona" de YOLO se mueva un poco de un frame a otro.
+        motion_mask_full = self._motion_gate.update_and_get_motion_mask(frame)
+        if motion_mask_full is None:
+            logger.info("[diag] fondo de movimiento todavía no establecido (primer frame) — sin gesto todavía")
+            return GestureResult(None, 0.0, 0)
+
         roi_box = self._find_person_roi(frame)
         if roi_box is not None:
             x1, y1, x2, y2 = roi_box
@@ -369,15 +451,22 @@ class GestureDetector:
             # presente, ver BITACORA.md "Fase 8".
             y1 = y1 + int((y2 - y1) * _FACE_EXCLUSION_TOP_FRACTION)
             roi = frame[y1:y2, x1:x2]
+            roi_motion_mask = motion_mask_full[y1:y2, x1:x2]
             logger.info("[diag] ROI tras excluir franja superior (%.0f%%): y1=%d..y2=%d, x1=%d..x2=%d",
                         _FACE_EXCLUSION_TOP_FRACTION * 100, y1, y2, x1, x2)
         else:
             logger.info("[diag] YOLO NO detectó ninguna 'person' — se usa el frame completo como ROI")
             roi = frame
+            roi_motion_mask = motion_mask_full
 
-        contour = segment_hand(roi)
+        logger.info("[diag] píxeles en movimiento en la ROI: %d", int(np.count_nonzero(roi_motion_mask)))
+
+        contour = segment_hand(roi, motion_mask=roi_motion_mask)
         if contour is None:
-            logger.info("[diag] segment_hand() no encontró ningún contorno de piel suficientemente grande en la ROI")
+            logger.info(
+                "[diag] segment_hand() no encontró ningún contorno de piel EN MOVIMIENTO "
+                "suficientemente grande en la ROI"
+            )
             return GestureResult(None, 0.0, 0)
 
         x, y, w, h = cv2.boundingRect(contour)
