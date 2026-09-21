@@ -1292,3 +1292,46 @@ de decidir si se avanza a Fase B.**
 
 Nada de este spike toca `cva_gesture_bridge/vision/detector.py` de producción ni se
 desplegó — vive solo en la rama `spike/fase8-mediapipe-viabilidad`.
+
+### Reporte de cierre de la sesión (Fase A del spike, 2026-09-21)
+
+**Qué se hizo:**
+1. Se registró en esta bitácora la decisión de pausar el ajuste de `MotionGate` sobre
+   producción y explorar MediaPipe HandLandmarker como alternativa — commit `014e025`
+   en `main`, antes de tocar código.
+2. Se confirmó que no había cambios de la sesión anterior sin commitear (`f44248c`, el
+   cierre de la pausa de `MotionGate`, ya lo había commiteado JD directamente).
+3. Se creó la rama `spike/fase8-mediapipe-viabilidad` desde ese punto de `main` —
+   aislada de producción.
+4. Se ejecutó la Fase A completa que se pudo ejecutar sin cámara: instalación,
+   benchmark de latencia (con imágenes disponibles, no un banco real de manos),
+   medición de CPU/memoria bajo 3 minutos de carga sostenida, y confirmación de que
+   el modelo se puede empaquetar localmente. Los puntos 2 (banco real de fotos) y 4
+   (estabilidad temporal con mano real) quedaron bloqueados por falta de acceso a
+   cámara/fotos reales — no se inventó ni se simuló ese dato.
+
+**Archivos creados/modificados:**
+- `.gitignore`: venv aislado del spike, `*.task`, carpeta de imágenes del spike.
+- `spike_mediapipe/benchmark_latency.py`, `spike_mediapipe/sustained_load.py` (no
+  forman parte del paquete `cva_gesture_bridge`).
+- `spike_mediapipe/hand_landmarker.task` (7.8MB, descargado de la fuente oficial de
+  Google, gitignorado — igual que `yolov8n.pt`, no se versiona).
+- `.venv-mediapipe-spike/` (entorno virtual nuevo, gitignorado, separado del `.venv`
+  de producción para no arriesgar el servicio en vivo).
+- `BITACORA.md`: esta sección y la de resultados crudos de arriba.
+
+**Resultado medido (resumen, datos completos arriba):** instalación limpia; latencia
+34-64ms vs. 440ms de YOLO nano (7-13x más rápido, con imágenes sin mano real todavía);
+CPU ~100% de un núcleo, RSS estable ~260MB sin leak en 3 minutos de carga sostenida;
+modelo empaquetable localmente igual que YOLO.
+
+**Commits en `spike/fase8-mediapipe-viabilidad`:** `25bce3d` (gitignore),
+`4e89dfd` (resultados). Ninguno pusheado — solo locales en esta Pi, como el resto del
+trabajo de esta sesión.
+
+**Pendiente / bloqueante para cerrar la Fase A completa:** JD necesita dar acceso de
+cámara a esta sesión (grupo `video`) y posar los gestos en vivo, o proveer fotos/video
+reales (2-3 tonos de piel si es posible, varias distancias, al menos un caso sin
+mano), para medir precisión de landmarks y estabilidad temporal — los dos puntos del
+plan que no se pudieron cerrar hoy. Sin eso, no hay base para decidir si se avanza a
+la Fase B.
