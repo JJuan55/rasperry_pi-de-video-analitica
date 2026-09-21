@@ -1124,3 +1124,32 @@ la mesa para esa decisión (sin resolver aquí):
   de la próxima ronda de pruebas o se deja mientras se sigue investigando.
 - Ningún commit de hoy se ha pusheado (`git push`) — siguen solo locales en esta Pi,
   a la espera de autorización explícita si JD quiere respaldarlos en el remoto.
+
+---
+
+## Decisión: explorar MediaPipe HandLandmarker como alternativa a YOLO+OpenCV (2026-09-21)
+
+Tras la pausa de arriba, JD decidió no seguir ajustando el `MotionGate` sobre el mismo
+diseño (AND píxel a píxel) y en vez de eso evaluar si **MediaPipe HandLandmarker**
+(landmarks de mano reales, no segmentación por color de piel) es una alternativa
+viable al stack actual YOLO+OpenCV para el reconocimiento de gestos en esta Pi 5.
+
+El plan completo (7 mecanismos de control de falsos positivos considerados, Fases B-E,
+comparación detallada contra YOLO) vive en un documento del proyecto,
+`CVA_deteccion-gestos_plan.md`, fuera de este repo — no se busca ni se asume su
+contenido aquí; si hace falta ese detalle durante el spike, se le pide a JD.
+
+**Alcance autorizado ahora: solo Fase A — un spike de viabilidad, aislado y
+reversible.** No se toca `cva_gesture_bridge/vision/detector.py` de producción ni se
+despliega nada. Corre en una rama aparte, `spike/fase8-mediapipe-viabilidad`, creada
+desde `main` en este mismo punto (incluye todo el trabajo de `MotionGate` ya pausado).
+
+Fase A mide, con datos reales en esta Pi 5 (no en teoría): si el paquete `mediapipe`
+instala en esta arquitectura/versión de Python, latencia real de inferencia contra un
+banco de imágenes fijas (luz normal, 2-3 tonos de piel, varias distancias, al menos un
+caso sin mano), CPU/memoria bajo inferencia sostenida de varios minutos, estabilidad
+de los landmarks frame a frame con una mano real quieta, y si el modelo
+(`hand_landmarker.task`) se puede empaquetar localmente en el repo (como ya está
+`yolov8n.pt`) sin que producción dependa de internet. Resultado esperado: datos crudos
+para decidir si se justifica seguir a las Fases B en adelante — no una implementación
+funcional todavía.
