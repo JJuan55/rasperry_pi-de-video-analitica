@@ -1153,3 +1153,142 @@ de los landmarks frame a frame con una mano real quieta, y si el modelo
 `yolov8n.pt`) sin que producción dependa de internet. Resultado esperado: datos crudos
 para decidir si se justifica seguir a las Fases B en adelante — no una implementación
 funcional todavía.
+
+### Resultados Fase A — datos crudos (2026-09-21, rama `spike/fase8-mediapipe-viabilidad`)
+
+Hardware: la misma Pi 5 de siempre (`Model: Raspberry Pi 5 Model B Rev 1.1`, 4 núcleos,
+16GB RAM). Entorno **aislado**: `.venv-mediapipe-spike/` (venv nuevo, separado del
+`.venv` de producción) — motivo: `mediapipe` trae `opencv-contrib-python` como
+dependencia, que ocupa el mismo namespace `cv2` que `opencv-python` (ya instalado, es
+lo que usa el servicio en producción); instalarlo en el venv compartido podía romper
+el servicio en vivo. Scripts del spike en `spike_mediapipe/` (no es parte del paquete
+`cva_gesture_bridge`, no se importa desde ahí).
+
+#### 1. Instalación — ✅ funciona, wheel real para aarch64/Python 3.14
+
+```
+$ .venv-mediapipe-spike/bin/pip install mediapipe
+Downloading mediapipe-1.0.1-py3-none-manylinux_2_28_aarch64.whl (35.8 MB)
+Downloading opencv_contrib_python-5.0.0.93-cp37-abi3-manylinux_2_28_aarch64.whl (57.9 MB)
+Successfully installed absl-py-2.5.0 ... mediapipe-1.0.1 numpy-2.5.3
+  opencv-contrib-python-5.0.0.93 ...
+```
+
+Verificado que importa y expone la API de `tasks.vision` (la que usa
+`HandLandmarker`):
+
+```
+$ .venv-mediapipe-spike/bin/python -c "import mediapipe as mp; ..."
+mediapipe version: 1.0.1
+cv2 version: 5.0.0
+imports de tasks/vision OK
+```
+
+#### 2. Latencia real — ✅ medida, pero **incompleta** (falta el banco de imágenes reales)
+
+**Bloqueo real encontrado:** esta sesión no tiene acceso a la cámara de la Pi —
+`groups` no incluye `video` (`david_cardenas sudo users`, sin `video`), y aunque lo
+tuviera, no hay forma de que un agente pose gestos de mano frente a una cámara. El
+banco de imágenes fijas con "luz normal, 2-3 tonos de piel, varias distancias" que
+pide el punto 2 del plan **necesita fotos reales que solo JD puede proveer** (ya sea
+dándole acceso de grupo `video` a esta sesión y posando en vivo, o pasando fotos/video
+ya capturados). **Esto queda pendiente, sin resolver en este spike.**
+
+Lo que sí se pudo medir con datos reales (imágenes disponibles sin mano específica —
+`zidane.jpg`, foto de personas de `ultralytics/assets`, y un frame en negro sintético
+como caso "sin mano"), mismo criterio de medición que el benchmark de YOLO de Fase 8
+(3 iteraciones de warmup descartadas, 30 medidas, sobre bytes JPEG decodificados con
+`cv2.imdecode`, resolución 320x240 — la resolución real confirmada del cliente):
+
+```
+Modelo: spike_mediapipe/hand_landmarker.task (7819105 bytes)
+Resolucion de prueba: 320x240
+
+== zidane.jpg (persona real, sin mano clara -- caso 'sin mano') ==
+  manos detectadas en la ultima corrida: 1
+  fps promedio:        15.70
+  latencia promedio:   63.7 ms
+  latencia p95:        65.1 ms
+  latencia min/max:    62.5 / 66.0 ms
+== frame en negro (caso 'sin mano', sintetico) ==
+  manos detectadas en la ultima corrida: 0
+  fps promedio:        29.04
+  latencia promedio:   34.4 ms
+  latencia p95:        37.6 ms
+  latencia min/max:    33.3 / 39.9 ms
+```
+
+**Comparación directa contra YOLO nano** (benchmark real de Fase 8, misma Pi, mismo
+método): YOLO nano dio **440.3 ms** promedio. HandLandmarker da **34-64 ms** — de
+**7 a 13 veces más rápido** en esta medición preliminar (sin mano real todavía; el
+tiempo con una mano real detectada podría variar, pero el orden de magnitud del
+modelo en sí ya es mucho menor). Nota honesta: `zidane.jpg` reportó "1 mano detectada"
+— probablemente un falso positivo sobre alguna región de piel de la foto (no es una
+mano real posada), dato a no sobre-interpretar; sirve para el tiempo de inferencia,
+no para precisión.
+
+#### 3. CPU/memoria bajo inferencia sostenida — ✅ medido, 3 minutos reales
+
+Proceso corrido en background (`spike_mediapipe/sustained_load.py 180`), muestreado
+con `ps` cada ~25s durante los 180s:
+
+```
+tiempo_s %CPU %MEM RSS_KB
+     32  101  1.5 259244
+     57  101  1.5 259396
+     82  100  1.5 261508
+    107  100  1.5 261520
+    132  100  1.6 261568
+    157  100  1.6 261568
+
+Listo: 2840 inferencias en 180.0s (15.78 fps sostenido)
+```
+
+**Lectura:** ~100-101% de un núcleo (saturado, consistente con inferencia síncrona de
+un solo hilo — igual que como correría hoy en el `run_in_executor` del bridge), RSS
+estable en ~259-262 MB (crecimiento de ~2MB en 3 minutos, dentro de ruido normal del
+allocator, no parece un leak). El fps sostenido (15.78) coincide con el medido en el
+benchmark de latencia (15.70-29.04 según el frame) — no hay caída de rendimiento
+apreciable bajo carga sostenida en esta ventana de 3 minutos.
+
+#### 4. Estabilidad temporal de landmarks — ❌ NO se pudo medir, bloqueado
+
+Requiere una mano real sostenida quieta capturada en varios frames consecutivos
+(video o varias fotos seguidas) — el mismo bloqueo del punto 2 (sin cámara, sin
+fotos reales). **No hay datos para este punto.** Pendiente de que JD provea
+video/fotos reales, o habilite acceso a la cámara para una sesión interactiva.
+
+#### 5. Modelo descargable y empaquetable localmente — ✅ confirmado
+
+```
+$ curl -sL -o spike_mediapipe/hand_landmarker.task \
+    "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task"
+HTTP status: 200
+-rw-rw-r-- 1 david_cardenas david_cardenas 7819105 hand_landmarker.task
+```
+
+Fuente oficial de Google (mismo `storage.googleapis.com/mediapipe-models`, no un
+tercero no verificado — comparable en confiabilidad a cómo `yolov8n.pt` se baja de
+`github.com/ultralytics/assets`). Tamaño (7.8MB) del mismo orden que `yolov8n.pt`
+(6.5MB) — igual de razonable para empaquetar localmente. Se agregó `*.task` a
+`.gitignore` (mismo criterio que `*.pt`/`*.onnx`/`*.weights`) y una carpeta
+`spike_mediapipe/images/` para no versionar el futuro banco de fotos.
+
+### Resumen para decidir sobre las Fases B en adelante
+
+**A favor de seguir:** instala limpio, corre limpio, y es dramáticamente más rápido
+que YOLO en esta Pi (34-64ms vs 440ms) incluso antes de optimizar nada — deja mucho
+más margen bajo el límite de AC3 (<1.5s) para el resto del pipeline (clasificación
+geométrica, envío). CPU/memoria estables bajo 3 minutos de carga sostenida. Modelo
+descargable de fuente oficial y empaquetable como ya se hace con YOLO.
+
+**Sin resolver, bloqueante para una decisión completa:** nada de esto se probó contra
+una mano real — ni precisión de landmarks, ni estabilidad temporal, ni el efecto real
+de distintos tonos de piel/distancias (que para MediaPipe, a diferencia del enfoque de
+color de piel actual, en teoría no debería importar tanto porque no segmenta por
+color — pero eso también es una hipótesis sin verificar todavía). **Se necesita a JD
+con acceso de cámara o fotos/video reales para cerrar los puntos 2 y 4 del plan antes
+de decidir si se avanza a Fase B.**
+
+Nada de este spike toca `cva_gesture_bridge/vision/detector.py` de producción ni se
+desplegó — vive solo en la rama `spike/fase8-mediapipe-viabilidad`.
