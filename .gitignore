@@ -9,6 +9,11 @@ venv/
 *.pt
 *.onnx
 *.weights
+*.task
+
+# ── Spike de viabilidad MediaPipe (rama spike/fase8-mediapipe-viabilidad) ──
+.venv-mediapipe-spike/
+spike_mediapipe/images/
 
 # ── Entorno/secretos ──
 .env
