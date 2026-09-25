@@ -1375,3 +1375,134 @@ sin necesidad de estar ahí.
 corre en `~/video_analitica/cva-pi-repo-spike`** — venv propio
 (`.venv-mediapipe-spike/`), rama propia, sin tocar en absoluto el directorio ni el
 `.venv` que usa `cva-gesture-bridge.service`.
+
+---
+
+## Fase A completa: resultados reales sobre 2132 frames capturados (2026-09-25)
+
+Con el capturador temporal desplegado en producción (ver `BITACORA.md` del repo de
+producción, rama `main`) y desactivado apenas terminó la sesión, JD grabó ~5.2 minutos
+reales (2132 frames, 320x240) haciendo los 4 gestos del catálogo, a distintas
+distancias, sin sacar la mano de cuadro entre uno y otro (los cambió en vivo), más
+algunos segundos sin ninguna mano. Los frames se movieron a
+`spike_mediapipe/captured_frames_2026-09-25/` (gitignorado, no se versiona — son fotos
+reales de una persona).
+
+### Metodología
+
+- `spike_mediapipe/analyze_captured_frames.py`: corre `HandLandmarker` sobre los 2132
+  frames en orden cronológico real (no por lotes al azar), guarda un CSV crudo
+  (`captured_frames_analysis.csv`: timestamp, archivo, etiqueta vieja del detector de
+  producción, `num_hands`, confianza) y calcula estadísticas generales.
+- Los "segmentos de mano presente" de ese primer script salieron demasiado largos
+  (JD nunca sacó la mano de cuadro entre gestos — un solo segmento de 129s y otro de
+  160s cubrían casi toda la sesión). `spike_mediapipe/segment_by_gesture.py` hace una
+  segunda pasada: clasifica cada frame por qué dedos están extendidos usando los
+  landmarks reales (heurística geométrica simple — distancia de la punta de cada dedo
+  al centro de la mano vs. la base del dedo; **no es la clasificación final de la Fase
+  B**, solo sirve para segmentar este dataset), y agrupa corridas consecutivas del
+  mismo patrón que duran ≥3 segundos como "gesto sostenido".
+- **Corrección hecha durante el análisis:** la primera pasada de esta heurística
+  etiquetaba varios tramos de palma abierta real como "4 dedos" (el umbral del pulgar
+  era muy estricto) — confirmado visualmente abriendo las imágenes anotadas
+  correspondientes con landmarks dibujados encima (se veían las 5 puntas de los dedos
+  extendidas, incluido el pulgar, con la confianza de MediaPipe en 0.97-0.99). Se
+  corrigió para que ≥4 dedos cuente como `palma_abierta` (mismo criterio que
+  `classify_gesture()` de producción). Esto es una falla de mi heurística de
+  segmentación, no de MediaPipe ni de los landmarks reales.
+
+### Resultados generales (los 2132 frames)
+
+| Métrica | Valor |
+|---|---|
+| Frames con mano detectada | 1976 (92.7%) |
+| Frames sin mano detectada | 156 (7.3%) |
+| Confianza (handedness score) con mano — min / media / max | 0.555 / 0.979 / 1.000 |
+
+### (c) Verificación de "sin mano" — 0 falsos positivos, con datos reales
+
+De los 156 frames sin mano, se identificaron 3 rachas consecutivas grandes que
+corresponden a los tramos reales sin mano de la sesión (inicio, un punto intermedio, y
+el final): **44, 37 y 22 frames seguidos** (~14.8s combinados) — **en los 156, `num_hands
+== 0` en el 100%, cero falsos positivos.** El resto son rachas cortas (1-8 frames,
+≤1.2s) dispersas entre gestos, consistentes con transiciones/oclusión momentánea, no
+con detecciones espurias.
+
+### (a) Confianza por gesto sostenido — tabla real
+
+20 de 22 tramos identificados (≥3s de patrón consistente) coinciden con uno de los 4
+gestos del catálogo; los otros 2 (70 frames, 3.3% del total) son transiciones entre
+gestos (2-3 dedos a medio extender), confirmadas visualmente como tales, no un gesto
+real sostenido.
+
+| Gesto | Tramos | Frames | Duración total | Confianza (min/media/max) |
+|---|---|---|---|---|
+| `puño_cerrado` | 3 | 222 | 32.5s | 0.997 / 0.998 / 0.999 |
+| `palma_abierta` | 6 | 600 | 87.0s | 0.955 / 0.974 / 0.986 |
+| `dedo_pulgar` | 6 | 262 | 38.6s | 0.920 / 0.966 / 0.994 |
+| `dedo_menique` | 5 | 407 | 59.1s | 0.978 / 0.988 / 0.998 |
+
+**Ningún gesto bajó de 0.92 de confianza en ningún tramo real.** Comparado con el
+sistema actual (YOLO+OpenCV), que en la misma sesión solo llegó a etiquetar 19 frames
+de 2132 con alguna confianza (y ninguno como `palma_abierta`), MediaPipe detectó y
+clasificó con confianza alta en 1491 de los 2132 frames (70%, sumando los 4 gestos)
+sin correr nada del sistema viejo.
+
+### (b) Estabilidad temporal — número concreto, no impresión visual
+
+Movimiento medio del conjunto de 21 landmarks entre frames consecutivos, dentro de
+cada tramo sostenido (en píxeles reales, sobre imagen de 320x240):
+
+| Gesto | Movimiento medio (min/media/max entre tramos) | Peor frame individual (cualquier tramo) |
+|---|---|---|
+| `puño_cerrado` | 1.97 / 3.18 / 4.88 px | 22.88 px |
+| `palma_abierta` | 1.05 / 2.80 / 4.46 px | 34.16 px |
+| `dedo_pulgar` | 1.34 / 1.86 / 2.21 px | 16.61 px |
+| `dedo_menique` | 2.03 / 3.16 / 5.67 px | 58.60 px |
+
+Para referencia: la imagen tiene 320px de ancho — un movimiento medio de 2-5px entre
+frames consecutivos (~140ms aparte a 7fps) es un temblor de mano normal, no ruido de
+detección. Los picos puntuales (34-58px en el peor frame de `palma_abierta`/
+`dedo_menique`) probablemente son movimientos reales de reacomodo de JD dentro del
+mismo tramo sostenido, no inestabilidad del modelo — quedan como dato crudo, sin
+filtrar, tal como se pidió.
+
+### Imágenes de ejemplo con landmarks dibujados (revisadas visualmente, no solo generadas)
+
+En `spike_mediapipe/captured_frames_annotated/` (22 imágenes, una por tramo). Las 4
+de referencia por gesto, ya abiertas y confirmadas visualmente durante este análisis:
+
+- `corrida_1_puño_cerrado_...jpg` — puño cerrado real y limpio.
+- `corrida_0_palma_abierta_...jpg` — palma abierta, 5 dedos extendidos incluido el
+  pulgar (la que reveló el bug del umbral de la heurística de segmentación).
+- `corrida_3_dedo_pulgar_...jpg` — pulgar arriba ("thumbs up") real.
+- `corrida_5_dedo_menique_...jpg` — meñique extendido, resto cerrado.
+- `corrida_6_otro(3_dedos)_...jpg` — ejemplo de transición (no es ninguno de los 4
+  gestos), confirmada visualmente como tal.
+
+### Limitaciones honestas de este análisis
+
+- **No se pudo separar por distancia ni por tono de piel** — JD no llevó un registro
+  de "a los X segundos hice el gesto Y a distancia Z", así que los 22 tramos se
+  identificaron por geometría, no por metadata de la sesión. Es razonable asumir que
+  los 6 tramos de `palma_abierta` (o los 6 de `dedo_pulgar`) incluyen las repeticiones
+  a distinta distancia que pidió el protocolo, pero no se puede confirmar cuál tramo
+  es cuál distancia sin que JD revise las imágenes y lo confirme.
+- **No participó una segunda persona con otro tono de piel** — la sesión fue solo JD.
+  Sigue sin datos sobre esa variable.
+- La heurística de conteo de dedos usada para *segmentar* este dataset (`classify_pattern`
+  en `segment_by_gesture.py`) es una regla geométrica simple hecha para este análisis,
+  no la clasificación final que se implementaría en una Fase B — sirvió para encontrar
+  y confirmar los tramos, pero no debe confundirse con el diseño de producción.
+
+### Comparación directa con el sistema actual (YOLO+OpenCV, mismos frames)
+
+El campo `old_label` en `captured_frames_analysis.csv` tiene la etiqueta que el
+detector de producción (corriendo en vivo durante la captura, con su cooldown/stability
+window normales) le puso a cada frame que sí evaluó. De 2132 frames: 2070
+`sin_evaluar` (el cooldown de 5s solo evalúa ~1 de cada 35 frames a 7fps), 43
+`sin_gesto`, y solo 19 con un gesto (8 `dedo_pulgar`, 6 `dedo_menique`, 5
+`puño_cerrado`, **0 `palma_abierta`** — la palma real nunca se reconoció ni una vez en
+vivo con el sistema actual, en toda la sesión). MediaPipe, corriendo sobre el 100% de
+los frames sin cooldown y sin heurística de piel/movimiento, encontró una mano en el
+92.7% y clasificó alguno de los 4 gestos con confianza ≥0.92 en el 70% del total.

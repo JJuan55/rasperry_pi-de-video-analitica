@@ -14,6 +14,11 @@ venv/
 # ── Spike de viabilidad MediaPipe (rama spike/fase8-mediapipe-viabilidad) ──
 .venv-mediapipe-spike/
 spike_mediapipe/images/
+# Fotos reales de una persona identificable (JD) -- crudas y anotadas con landmarks.
+# Se quedan locales en esta Pi para que JD las revise, nunca al control de versiones
+# (ver BITACORA.md, sesión de captura del 2026-09-25).
+spike_mediapipe/captured_frames_2026-09-25/
+spike_mediapipe/captured_frames_annotated/
 
 # ── Entorno/secretos ──
 .env
