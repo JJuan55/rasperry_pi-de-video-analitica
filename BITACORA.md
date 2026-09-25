@@ -1311,12 +1311,146 @@ reproducibilidad, mismo criterio que el resto del proyecto).
 torch/torchvision/ultralytics/opencv-python hasta que Fase B se apruebe y se
 despliegue.
 
-### Próximo paso
+### Implementación — `GestureDetector` con `HandLandmarker` (2026-09-25)
 
-Implementar el `GestureDetector` nuevo con `HandLandmarker` (detalle completo en
-`CVA_deteccion-gestos_plan.md` §3, que JD puede pasar si hace falta el texto
-completo) — umbrales de confianza propios del modelo, coordenadas de mundo
-normalizadas, filtro de suavizado tipo One Euro, retirando `MotionGate`/segmentación
-HSV/recorte de franja superior con comentarios explícitos de por qué. Tests con los
-frames reales ya capturados en Fase A como fixtures, incluyendo cara sola, torso
-solo, y frame vacío.
+Reescrito `cva_gesture_bridge/vision/detector.py` completo: `HandLandmarker` en
+`RunningMode.VIDEO` (timestamps estrictamente crecientes, `_next_timestamp_ms()`
+fuerza el mínimo incremento de 1ms si el reloj de pared se repite), clasificación
+sobre `hand_world_landmarks` (coordenadas de mundo 3D en metros, normalizadas por el
+tamaño real de la mano — no depende de qué tan cerca esté del lente), `OneEuroFilter`
++ `LandmarkSmoother` nuevos (suavizado de las 63 coordenadas de la secuencia
+temporal), y **retirados `MotionGate`, la segmentación HSV de piel y el recorte de
+franja superior** — el docstring del módulo documenta en detalle por qué (conflicto
+estructural real de `MotionGate` con una mano que cambia de gesto sin salir de
+cuadro, confusión geométrica cara/torso/mano de HSV a 320x240 — ambos ya
+confirmados con datos reales en Fase 8, no una corazonada). `GestureResult` y
+`GestureStabilizer` quedaron sin cambios (compatibles con `main.py` tal cual).
+`config.py`/`main.py` actualizados para instanciar `GestureDetector` con el modelo y
+los 3 umbrales propios de MediaPipe (`min_hand_detection_confidence`,
+`min_hand_presence_confidence`, `min_tracking_confidence`, default 0.5 cada uno,
+ajustables por variable de entorno). Modelo (`models/hand_landmarker.task`, 7,819,105
+bytes, mismo binario oficial de Google usado en el spike) descargado a esta rama,
+gitignorado (`*.task`).
+
+### Bug real encontrado y corregido: umbral de "pulgar extendido" en coordenadas de mundo
+
+Los ratios heredados del spike (`_THUMB_EXTENDED_RATIO=1.3`, medido contra el nudillo
+base del índice en vez de la muñeca) se habían marcado explícitamente en el código
+como "sujetos a ajuste con fixtures reales, no se dan por buenos a ciegas" — y en
+efecto, al probarlos contra un pulgar-arriba real (fixture real, ver abajo), el ratio
+medido fue **1.253, por debajo del umbral de 1.3** → se clasificaba como
+`puño_cerrado` en vez de `dedo_pulgar` (falso negativo real). Solución: medir el
+pulgar contra la **muñeca**, igual que los otros 4 dedos (antes era el único que se
+medía contra el nudillo del índice), con umbral recalibrado a **1.7** —
+midpoint entre el ratio real de un puño (1.424) y el de un pulgar-arriba real
+(2.184), con margen amplio a ambos lados. Verificado que esto no rompe la
+clasificación de puño ni de palma abierta contra los mismos fixtures reales (ver
+tabla abajo). El campo `INDEX_MCP` quedó sin uso tras el cambio y se eliminó.
+
+### Hallazgo real: las etiquetas de nombre de archivo de Fase A (sistema viejo,
+YOLO+OpenCV) NO son ground truth confiable
+
+Al elegir fixtures reales para los tests, se tomaron inicialmente los frames con
+mayor confianza por gesto según la etiqueta embebida en el nombre de archivo (ese
+nombre lo pone el sistema VIEJO en tiempo real durante la captura, no una anotación
+manual). Al inspeccionar las imágenes reales una por una (no solo confiar en el
+nombre), se encontró que **al menos 3 de los 4 archivos "mejor etiquetados" tenían la
+etiqueta equivocada**: los 3 candidatos con mayor confianza de "puño_cerrado" eran en
+realidad fotos reales de **pulgar arriba** (thumbs-up claro, visualmente inequívoco),
+y un candidato "dedo_menique" resultó ser un puño cerrado real. Esto es evidencia
+adicional, independiente de todo lo ya documentado en Fase 7/8, de por qué el sistema
+viejo era poco confiable — y una advertencia concreta para el futuro: **nunca usar la
+etiqueta de nombre de archivo de estos frames como ground truth sin inspección
+visual**, incluso dentro de esta misma carpeta de fixtures.
+
+### Fixtures reales — `tests/fixtures_real/` (gitignorado, fotos reales de JD, nunca al repo)
+
+Confirmados uno por uno visualmente (no por su nombre de archivo original) y luego
+verificados con el `GestureDetector` real de esta fase, cada uno con una instancia
+**nueva** (no compartida — ver más abajo por qué):
+
+| archivo                        | gesto real (confirmado a ojo) | `GestureDetector.detect()` | confianza |
+|---------------------------------|-------------------------------|------------------------------|-----------|
+| `fixture_puno_cerrado.jpg`      | puño cerrado                  | `puño_cerrado`               | 0.9983    |
+| `fixture_palma_abierta.jpg`     | palma abierta                 | `palma_abierta`              | 0.9678    |
+| `fixture_dedo_pulgar.jpg`       | pulgar arriba                 | `dedo_pulgar`                | 0.9894    |
+| `fixture_dedo_menique.jpg`      | un solo dedo extendido (ver nota) | `dedo_menique`            | 0.9992    |
+| `persona_cara_sin_mano.jpg`     | cara+torso real, sin mano posada, redimensionado a 320x240 (resolución real del cliente) | `None` | 0.0 |
+| `persona_torso_sin_mano_1.jpg`  | torso real, sin mano en cuadro (frame real de una racha de 96 frames consecutivos con 0 manos, sesión 2 de Fase A) | `None` | 0.0 |
+| `persona_torso_sin_mano_2.jpg`  | ídem, otro frame de la misma racha | `None` | 0.0 |
+| frame negro sintético (240x320) | vacío                          | `None`                        | 0.0       |
+
+**Nota sobre `fixture_dedo_menique.jpg`:** el dedo levantado no se pudo confirmar a
+ojo con certeza total desde la foto plana (la rotación de la mano en ese frame hace
+ambiguo si es el índice o el meñique visualmente) — pero la clasificación geométrica
+de MediaPipe (que sí tiene profundidad 3D real, no una foto plana) es consistente y
+de alta confianza (0.9992). Se acepta como fixture de `dedo_menique` con esta
+salvedad documentada explícitamente, no en silencio.
+
+**Caso histórico investigado y resuelto — cara/torso como falso positivo (pedido
+explícito de JD, `persona_cara_sin_mano.jpg` es la misma imagen que `zidane.jpg` del
+spike):** en Fase A, el benchmark original reportó "1 mano detectada" para esta foto.
+Investigado a fondo en esta fase: el detector **crudo** de MediaPipe, alimentado con
+la imagen a la resolución real del cliente (320x240, no a resolución completa —
+la discrepancia con corridas anteriores era justamente esa, resolución completa daba
+0 manos, 320x240 sí detecta algo), **sí encuentra un "hand" en esta cara/torso real**,
+con score de handedness alto (0.795–0.912 en 3 corridas). Esto **no es un falso
+negativo del modelo** — es un verdadero landmark geométrico que MediaPipe interpreta
+como mano en esa región de piel/tela. Lo que evita que esto llegue como un gesto real
+al cliente es la capa de clasificación de esta app: el patrón de dedos extendidos que
+resulta de esos landmarks (2 dedos "extendidos" en la corrida final verificada) no
+coincide con ninguno de los 4 patrones del catálogo (ni puño, ni palma, ni pulgar
+solo, ni meñique solo) — así que `classify_world_landmarks` devuelve `None`,
+`GestureResult.confidence` queda en 0.0, y `GestureStabilizer` nunca lo confirmaría
+aunque se repitiera (necesita el mismo gesto no-None 2 de 3 veces). **Resuelto y
+entendido, no ignorado** — con una salvedad honesta para el futuro: esta protección
+depende de que el patrón geométrico de un falso positivo de piel/cara no coincida
+por casualidad con uno de los 4 patrones específicos del catálogo; no es una garantía
+absoluta para cualquier imagen posible, es lo verificado contra los fixtures reales
+disponibles hoy.
+
+**Torso solo:** dos frames reales de una racha de 96 frames consecutivos con
+`num_hands==0` (confirmado por el propio análisis de Fase A, sesión 2, CSV
+`captured_frames_analysis_2026-09-25_v2.csv`) — JD sentado frente a cámara sin mano
+en cuadro. Ambos dan `None`/0.0 con el detector de esta fase, sin necesitar
+`MotionGate` para lograrlo.
+
+**Meta de JD ("cero falsos positivos de los tres tipos históricos: cara-como-puño,
+ruido de piel, torso-como-puño") — cumplida contra estos fixtures reales**, con la
+salvedad explícita de arriba sobre por qué (clasificación geométrica, no ausencia de
+detección cruda).
+
+### Descubrimiento de testing: `RunningMode.VIDEO` con fotos sueltas sin relación temporal
+
+Durante la investigación se encontró que reusar una misma instancia de
+`GestureDetector`/`HandLandmarker` para varias fotos reales sin relación temporal
+(no una secuencia de video real) da resultados **distintos según el orden y los
+timestamps** en que se le pasan — el mismo frame de `palma_abierta` pasó de "0 manos
+detectadas" a clasificar correctamente solo por usar una instancia nueva en vez de
+reusar una ya "contaminada" por el frame anterior. Tiene sentido: `VIDEO` mode asume
+continuidad temporal real entre llamadas (para eso existe el tracking interno) y
+fotos sueltas violan esa asunción. **No afecta el uso real en producción** (los
+frames del cliente sí son una secuencia real) — pero si afecta cómo se deben escribir
+tests contra fixtures reales: `tests/test_detector.py` usa una fixture
+`fresh_detector` (function-scoped, instancia nueva por test) por esta razón,
+documentado en el docstring del archivo.
+
+### Resultado de tests
+
+`tests/test_detector.py` reescrito completo (35 tests: geometría sintética de
+`extended_fingers_pattern`/`classify_world_landmarks`, `OneEuroFilter`/
+`LandmarkSmoother`, `format_line`, `GestureStabilizer` sin cambios, y 8 tests contra
+los fixtures reales de arriba). Suite completa del repo: **63 passed, 0 failed**
+(`.venv-fase-b/bin/pytest -q`).
+
+### Pendiente antes de cerrar Fase B
+
+- Push de la rama (bloqueado por credenciales, igual que el housekeeping — JD debe
+  correrlo directamente).
+- Autorización explícita de JD antes de: tocar el `.venv` de producción, reiniciar
+  `cva-gesture-bridge.service`, o desplegar este código — nada de eso se hizo ni se
+  hará sin ese aviso previo.
+- Posible: capturar un frame específico de `dedo_menique` sin la ambigüedad visual
+  documentada arriba, si JD lo considera necesario (requeriría reactivar el
+  capturador temporal, con autorización explícita, igual que las dos sesiones de
+  Fase A).

@@ -10,6 +10,8 @@ venv/
 *.pt
 *.onnx
 *.weights
+*.task
+models/
 
 # ── Entorno/secretos ──
 .env
@@ -19,6 +21,12 @@ venv/
 # ── Captura temporal de frames para el spike de MediaPipe (runtime, se mueve al
 # worktree del spike y no se queda ni se versiona aquí — ver BITACORA.md) ──
 captured_frames/
+
+# ── Fixtures reales de Fase B (fotos reales de JD tomadas en Fase A — nunca al repo,
+# mismo criterio de privacidad que captured_frames/; ver tests/test_detector.py y
+# BITACORA.md "Fase B". Los tests que dependen de esta carpeta se saltan (skip) si no
+# está presente, así el resto del suite sigue corriendo en un clon limpio) ──
+tests/fixtures_real/
 
 # ── OS ──
 .DS_Store

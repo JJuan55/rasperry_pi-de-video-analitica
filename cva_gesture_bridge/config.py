@@ -16,13 +16,28 @@ LOG_LEVEL = os.environ.get("CVA_LOG_LEVEL", "INFO")
 LOG_FILE = os.environ.get("CVA_LOG_FILE", "logs/cva_gesture_bridge.log")
 LOG_RETENTION_DAYS = int(os.environ.get("CVA_LOG_RETENTION_DAYS", "7"))
 
-# Fase 8 — visión. Tamaño de modelo elegido en BITACORA.md ("Fase 8") a partir del
-# benchmark real en esta Pi 5, no de suposición.
-YOLO_MODEL = os.environ.get("CVA_YOLO_MODEL", "yolov8n.pt")
+# Fase B — visión con MediaPipe HandLandmarker (reemplaza YOLO+OpenCV de Fase 8, ver
+# BITACORA.md "Fase B" para el porqué). Modelo oficial de Google, empaquetado
+# localmente igual que antes yolov8n.pt (no se descarga en producción).
+MEDIAPIPE_MODEL_PATH = os.environ.get("CVA_MEDIAPIPE_MODEL_PATH", "models/hand_landmarker.task")
 
-# Umbral mínimo de confianza para traducir una detección en una línea real hacia el
-# cliente (sección 4.4 de CLAUDE.md). Punto de partida, se ajusta con datos reales
-# de la validación manual documentada en BITACORA.md.
+# Umbrales propios del modelo (HandLandmarkerOptions) — distintos de MIN_CONFIDENCE de
+# abajo: estos controlan si MediaPipe reporta una mano en absoluto; MIN_CONFIDENCE
+# controla si, ya con una mano reportada, se manda la línea al cliente. Puntos de
+# partida razonables (valores por defecto de MediaPipe), a ajustar con datos reales.
+MEDIAPIPE_MIN_HAND_DETECTION_CONFIDENCE = float(
+    os.environ.get("CVA_MEDIAPIPE_MIN_HAND_DETECTION_CONFIDENCE", "0.5")
+)
+MEDIAPIPE_MIN_HAND_PRESENCE_CONFIDENCE = float(
+    os.environ.get("CVA_MEDIAPIPE_MIN_HAND_PRESENCE_CONFIDENCE", "0.5")
+)
+MEDIAPIPE_MIN_TRACKING_CONFIDENCE = float(
+    os.environ.get("CVA_MEDIAPIPE_MIN_TRACKING_CONFIDENCE", "0.5")
+)
+
+# Umbral mínimo de confianza (handedness score del modelo) para traducir una detección
+# en una línea real hacia el cliente (sección 4.4 de CLAUDE.md). Punto de partida, se
+# ajusta con datos reales de la validación manual documentada en BITACORA.md.
 MIN_CONFIDENCE = float(os.environ.get("CVA_MIN_CONFIDENCE", "0.5"))
 
 # Tiempo mínimo entre que se procesa un gesto (se corre YOLO+OpenCV sobre un frame) y
