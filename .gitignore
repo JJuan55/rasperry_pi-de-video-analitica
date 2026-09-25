@@ -3,6 +3,7 @@ __pycache__/
 *.pyc
 .venv/
 venv/
+.venv-fase-b/
 *.egg-info/
 
 # ── Modelos/pesos pesados (no versionar binarios grandes) ──

@@ -1255,3 +1255,68 @@ reiniciar matando el PID (`Restart=always` lo revive leyendo el archivo actualiz
 **Esperando que JD confirme que está listo para hacer la sesión de prueba real** (los
 4 gestos, distintas distancias, un tono de piel distinto si consigue a alguien, y unos
 segundos sin mano) — avisar apenas termine para apagar la captura de inmediato.
+
+---
+
+## Fase B — reemplazar YOLO+OpenCV por MediaPipe HandLandmarker (2026-09-25)
+
+Con la Fase A cerrada con datos reales (ambas sesiones de captura, ver `BITACORA.md`
+de la rama `spike/fase8-mediapipe-viabilidad`, commits `1730153` y `10d71de`), JD
+aprobó avanzar a Fase B: esto ya es implementación real sobre
+`cva_gesture_bridge/vision/detector.py`, no un spike descartable — pero **todavía no
+se toca el `.venv` de producción ni se reinicia el servicio real sin autorización
+explícita**, igual que con el capturador temporal.
+
+### Housekeeping antes de tocar código
+
+1. **Rama huérfana en origin (`fase8-mediapipe-viabilidad`, sin el prefijo `spike/`):**
+   quedó abandonada cuando el trabajo real se continuó bajo `spike/fase8-mediapipe-viabilidad`
+   (la correctamente nombrada, con todos los commits). Pedido borrarla. **Bloqueado:**
+   esta sesión no tiene credenciales de push (mismo problema de siempre) — se le pidió
+   a JD el comando `git push origin --delete fase8-mediapipe-viabilidad` para que lo
+   corra él. **Pendiente de confirmación.**
+2. **Rama y worktree nuevos para Fase B:** `fase8-fase-b-mediapipe-pipeline`, creada
+   desde `main` (commit `109a112`, el mismo que `origin/main`). Worktree en
+   `~/video_analitica/cva-pi-repo-fase-b`, venv propio `.venv-fase-b/` (mismo patrón
+   que el spike — aislado del `.venv` de producción). **Pendiente de push inicial**
+   (mismo bloqueo de credenciales) — JD tiene los comandos para correrlo.
+
+### Investigación de dependencias — con evidencia real, no supuesta
+
+**¿`opencv-contrib-python` sirve como reemplazo drop-in de `opencv-python` en este
+proyecto?** Se listaron todos los símbolos de `cv2` realmente usados en
+`detector.py`/`main.py`/tests (`imencode`, `imdecode`, `cvtColor`, `inRange`,
+`morphologyEx`, `findContours`, `contourArea`, `convexHull`, `convexityDefects`,
+`boundingRect`, `threshold`, `dilate`, `absdiff`, `bitwise_and`,
+`getStructuringElement`, `ellipse`, `fillPoly`, `rectangle`, más las constantes) — se
+instaló `mediapipe` en el venv nuevo (que trae `opencv-contrib-python` como
+dependencia, **sin `opencv-python` instalado en absoluto**), se confirmó que los 28
+símbolos existen (`hasattr`, ninguno faltante), y **se corrió la suite completa de
+tests existente contra ese venv: 54 passed, 0 failed.** Confirmado empíricamente, no
+solo por documentación de que "contrib es superset" — **sí sirve como reemplazo
+drop-in** para el uso real de este proyecto.
+
+**¿Se puede sacar `torch`/`torchvision`/`ultralytics` de `requirements.txt`?** Sí,
+confirmado: ningún archivo del repo fuera de `detector.py` (que se va a reescribir
+para no usar YOLO) los importa, y el propio `GestureDetector.__init__` es el único
+punto que hace `from ultralytics import YOLO` — con MediaPipe localizando la mano
+directamente (sin necesitar YOLO para acotar la región "persona" primero), ese import
+desaparece por completo. `requirements.txt` de esta rama quedó reducido a
+`mediapipe==1.0.1` + `opencv-contrib-python==5.0.0.93` (esta última ya viene como
+dependencia transitiva de mediapipe, se fija la versión explícita de todos modos por
+reproducibilidad, mismo criterio que el resto del proyecto).
+
+**Nota:** esto es una decisión para *esta rama* (`fase8-fase-b-mediapipe-pipeline`) —
+`requirements.txt` de `main` no se toca todavía; el servicio real sigue con
+torch/torchvision/ultralytics/opencv-python hasta que Fase B se apruebe y se
+despliegue.
+
+### Próximo paso
+
+Implementar el `GestureDetector` nuevo con `HandLandmarker` (detalle completo en
+`CVA_deteccion-gestos_plan.md` §3, que JD puede pasar si hace falta el texto
+completo) — umbrales de confianza propios del modelo, coordenadas de mundo
+normalizadas, filtro de suavizado tipo One Euro, retirando `MotionGate`/segmentación
+HSV/recorte de franja superior con comentarios explícitos de por qué. Tests con los
+frames reales ya capturados en Fase A como fixtures, incluyendo cara sola, torso
+solo, y frame vacío.
