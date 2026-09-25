@@ -71,10 +71,10 @@ def benchmark(name: str, jpeg_bytes: bytes, landmarker) -> None:
 
 
 if __name__ == "__main__":
-    ultralytics_assets = os.path.join(
-        HERE, "..", ".venv", "lib", "python3.14", "site-packages", "ultralytics", "assets"
-    )
-    zidane = cv2.imread(os.path.join(ultralytics_assets, "zidane.jpg"))
+    # Copia local, no una ruta cruzada al repo de producción -- este spike corre en su
+    # propio worktree y no debe depender de nada fuera de él (ver BITACORA.md,
+    # "Corrección de aislamiento", 2026-09-25).
+    zidane = cv2.imread(os.path.join(HERE, "zidane_test.jpg"))
     blank = np.zeros((480, 640, 3), dtype=np.uint8)
 
     print(f"Modelo: {MODEL_PATH} ({os.path.getsize(MODEL_PATH)} bytes)")

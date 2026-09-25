@@ -23,10 +23,9 @@ options = mp_vision.HandLandmarkerOptions(
 )
 landmarker = mp_vision.HandLandmarker.create_from_options(options)
 
-ultralytics_assets = os.path.join(
-    HERE, "..", ".venv", "lib", "python3.14", "site-packages", "ultralytics", "assets"
-)
-zidane = cv2.resize(cv2.imread(os.path.join(ultralytics_assets, "zidane.jpg")), FRAME_SIZE)
+# Copia local, no una ruta cruzada al repo de producción (ver BITACORA.md,
+# "Corrección de aislamiento", 2026-09-25).
+zidane = cv2.resize(cv2.imread(os.path.join(HERE, "zidane_test.jpg")), FRAME_SIZE)
 frame_rgb = cv2.cvtColor(zidane, cv2.COLOR_BGR2RGB)
 
 print(f"PID={os.getpid()}", flush=True)
