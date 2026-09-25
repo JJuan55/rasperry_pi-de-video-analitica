@@ -1176,7 +1176,7 @@ gateado por una variable de entorno que por defecto está apagada.
       por cooldown se guarda como `sin_evaluar` (no `sin_gesto` — nunca se evaluó,
       etiquetarlo como "sin gesto" sería un dato falso). `pytest`: **54 passed**
       (50 previos + 4 nuevos).
-- [ ] Setear la variable, reiniciar el servicio, confirmar con `systemctl status` que
+- [x] Setear la variable, reiniciar el servicio, confirmar con `systemctl status` que
       sigue corriendo normal y que la carpeta se creó.
 - [ ] Avisar (a través de JD) cuando esté listo para la sesión de prueba real.
 - [ ] Al terminar JD: apagar la variable, reiniciar de nuevo, confirmar que volvió al
@@ -1212,3 +1212,41 @@ gateado por una variable de entorno que por defecto está apagada.
 
 **Pendiente:** commitear esto, luego los pasos 2 en adelante de la tasklist (activar,
 coordinar con JD, capturar, apagar, mover, medir, documentar).
+
+### Mejora de infraestructura — `EnvironmentFile` en el drop-in del servicio (2026-09-25)
+
+Para activar `CVA_CAPTURE_FRAMES_DIR` en el proceso real (corre bajo `systemd`) hacía
+falta editar `/etc/systemd/system/cva-gesture-bridge.service`, propiedad de `root` —
+esta sesión no tiene `sudo` interactivo (mismo bloqueo que ya había con el nivel de
+log). En vez de pedirle a JD `sudo` cada vez que haga falta una variable nueva, se le
+pidió un cambio de infraestructura de una sola vez: JD corrió
+`sudo systemctl edit cva-gesture-bridge.service` y agregó un drop-in
+(`/etc/systemd/system/cva-gesture-bridge.service.d/override.conf`):
+
+```ini
+[Service]
+EnvironmentFile=-/home/david_cardenas/video_analitica/rasperry_pi-de-video-analitica/.capture.env
+```
+
+(el `-` inicial = "si el archivo no existe, seguir sin error"). Tomó dos intentos: el
+primero guardó el drop-in vacío (no se escribió nada en la sección editable), el
+segundo tuvo un typo (`EnviromentFile`, sin la "n" de "Environment"). Confirmado en el
+tercer intento con `systemctl show -p EnvironmentFiles` (mostraba la ruta correcta) y
+`systemctl status` (sección `Drop-In:` visible).
+
+**De ahora en adelante**, activar/desactivar variables de entorno para este servicio
+(esta captura, o futuros ajustes como el nivel de log) no necesita `sudo` — alcanza con
+escribir/editar `.capture.env` (archivo propio de `david_cardenas`, gitignorado) y
+reiniciar matando el PID (`Restart=always` lo revive leyendo el archivo actualizado).
+
+**Confirmación real de la activación:**
+- `cat /proc/<PID>/environ` del proceso nuevo (PID `71566`) muestra
+  `CVA_CAPTURE_FRAMES_DIR=/home/david_cardenas/video_analitica/rasperry_pi-de-video-analitica/captured_frames`.
+- La carpeta `captured_frames/` se creó al arrancar (confirmado con `ls`).
+- El log real tiene la línea `WARNING ... [CAPTURA TEMPORAL ACTIVA] Guardando copia de
+  cada frame en .../captured_frames -- desactivar...`.
+- `systemctl status`: `Active: active (running)`, sin errores.
+
+**Esperando que JD confirme que está listo para hacer la sesión de prueba real** (los
+4 gestos, distintas distancias, un tono de piel distinto si consigue a alguien, y unos
+segundos sin mano) — avisar apenas termine para apagar la captura de inmediato.
