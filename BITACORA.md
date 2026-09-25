@@ -1335,3 +1335,43 @@ reales (2-3 tonos de piel si es posible, varias distancias, al menos un caso sin
 mano), para medir precisión de landmarks y estabilidad temporal — los dos puntos del
 plan que no se pudieron cerrar hoy. Sin eso, no hay base para decidir si se avanza a
 la Fase B.
+
+---
+
+### Corrección de aislamiento: el spike se movió a un worktree separado (2026-09-25)
+
+JD encontró un problema real en cómo se hizo el aislamiento de la Fase A: aunque el
+`.venv` de producción nunca se tocó (se usó `.venv-mediapipe-spike/` aparte, como se
+documentó arriba), **los cambios de rama sí se hicieron en el mismo directorio que usa
+el servicio real** (`~/video_analitica/rasperry_pi-de-video-analitica`). Confirmado
+con `systemctl show cva-gesture-bridge.service -p WorkingDirectory,ExecStart`:
+
+```
+WorkingDirectory=/home/david_cardenas/video_analitica/rasperry_pi-de-video-analitica
+ExecStart=.../rasperry_pi-de-video-analitica/.venv/bin/python -m cva_gesture_bridge.main
+```
+
+Ese directorio es el mismo donde se hicieron los `git checkout -b`/commits del spike.
+Si el servicio se hubiera reiniciado (crash, reinicio de la Pi, `Restart=always` tras
+un fallo) mientras el directorio estaba parado en la rama del spike, habría arrancado
+con ese código — no con `main`. No llegó a pasar (no hubo reinicios del servicio
+mientras se trabajaba en la rama del spike), pero era una ventana de riesgo real,
+sin necesidad de estar ahí.
+
+**Corrección aplicada, en este orden:**
+1. `git checkout main` en `~/video_analitica/rasperry_pi-de-video-analitica` —
+   primero, para cerrar la ventana de riesgo antes de cualquier otra cosa.
+2. `git worktree add ~/video_analitica/cva-pi-repo-spike spike/fase8-mediapipe-viabilidad`
+   — un segundo directorio con la misma rama, sin afectar el directorio real.
+3. Los artefactos que ya existían del spike (no versionados: `.venv-mediapipe-spike/`
+   y `spike_mediapipe/hand_landmarker.task`, que se habían creado dentro del
+   directorio de producción antes de este ajuste) se **movieron** a este worktree, no
+   se copiaron — no quedó rastro en el directorio de producción.
+4. Verificado después de la corrección: `~/video_analitica/rasperry_pi-de-video-analitica`
+   está en `main`, árbol de trabajo limpio, sin ningún archivo/carpeta del spike; el
+   servicio sigue con el mismo PID de antes (no se reinició para hacer este cambio).
+
+**De ahora en adelante, todo el trabajo de la Fase A (y del resto del spike, si sigue)
+corre en `~/video_analitica/cva-pi-repo-spike`** — venv propio
+(`.venv-mediapipe-spike/`), rama propia, sin tocar en absoluto el directorio ni el
+`.venv` que usa `cva-gesture-bridge.service`.
