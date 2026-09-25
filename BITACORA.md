@@ -1153,3 +1153,62 @@ de los landmarks frame a frame con una mano real quieta, y si el modelo
 `yolov8n.pt`) sin que producción dependa de internet. Resultado esperado: datos crudos
 para decidir si se justifica seguir a las Fases B en adelante — no una implementación
 funcional todavía.
+
+---
+
+## Capturador temporal de frames reales para el spike de MediaPipe (2026-09-25)
+
+Autorizado explícitamente por JD para destrabar los puntos 2 y 4 de la Fase A del
+spike (banco de imágenes reales y estabilidad temporal de landmarks), que llevaban
+bloqueados desde el 2026-09-21 por falta de acceso a cámara. En vez de darle acceso de
+cámara a esta sesión, se agrega un capturador temporal a `main.py` de producción,
+gateado por una variable de entorno que por defecto está apagada.
+
+### Tasklist
+
+- [x] `config.CAPTURE_FRAMES_DIR` (env `CVA_CAPTURE_FRAMES_DIR`) — sin setear, cero
+      cambio de comportamiento.
+- [x] `main.py`: al procesar cada frame, si la variable está seteada, guardar además
+      una copia del JPEG crudo a disco, con nombre `{epoch_ms}__{etiqueta}.jpg`. Sin
+      tocar la lógica de cooldown/detección/stabilizer existente.
+- [x] Tests nuevos (`tests/test_main.py`, 4 casos) — capturador apagado no escribe
+      nada; frame procesado se guarda con su gesto real o `sin_gesto`; frame saltado
+      por cooldown se guarda como `sin_evaluar` (no `sin_gesto` — nunca se evaluó,
+      etiquetarlo como "sin gesto" sería un dato falso). `pytest`: **54 passed**
+      (50 previos + 4 nuevos).
+- [ ] Setear la variable, reiniciar el servicio, confirmar con `systemctl status` que
+      sigue corriendo normal y que la carpeta se creó.
+- [ ] Avisar (a través de JD) cuando esté listo para la sesión de prueba real.
+- [ ] Al terminar JD: apagar la variable, reiniciar de nuevo, confirmar que volvió al
+      estado normal.
+- [ ] Mover (no copiar) los frames capturados al worktree del spike.
+- [ ] Correr HandLandmarker sobre los frames reales: confianza por condición,
+      variación frame a frame de landmarks en tramos sostenidos (número concreto),
+      confirmar 0 detecciones en los frames "sin mano".
+- [ ] Documentar en `BITACORA.md` (esta, o la del worktree del spike) los números
+      crudos y al menos una imagen de ejemplo por gesto con los landmarks dibujados.
+
+### Detalle de la implementación
+
+- `config.py`: `CAPTURE_FRAMES_DIR = os.environ.get("CVA_CAPTURE_FRAMES_DIR")` — sin
+  default, `None` si no se setea.
+- `main.py`:
+  - `_prepare_capture_dir_if_configured()`: crea la carpeta al arrancar (no de forma
+    perezosa en el primer frame) para poder confirmarla enseguida tras el reinicio;
+    loguea un `WARNING` explícito ("CAPTURA TEMPORAL ACTIVA") recordando apagarla.
+  - `_capture_frame_to_disk()`: escribe el JPEG crudo tal cual llegó (sin
+    recodificar). Un fallo de escritura (disco lleno, permisos) se loguea como
+    `ERROR` explícito pero no interrumpe la sesión de prueba real — no vale la pena
+    tumbar la conexión del cliente por un problema de captura, que es solo
+    instrumentación temporal.
+  - Dentro de `on_jpeg_frame`, la captura corre en `run_in_executor` (I/O de disco,
+    igual criterio que la inferencia) tanto para el frame que sí se procesa (etiqueta
+    = gesto real o `sin_gesto`) como para el que cae en cooldown (etiqueta
+    `sin_evaluar`, para no mezclar "no se detectó nada" con "nunca se evaluó").
+  - `capture_dir` se lee de `config` **una sola vez**, al armar el closure
+    (`_make_on_jpeg_frame`), no en cada frame — si se cambiara la variable de entorno
+    en caliente no se notaría hasta el próximo reinicio, que es exactamente el
+    comportamiento esperado (systemd solo relee el entorno al reiniciar el proceso).
+
+**Pendiente:** commitear esto, luego los pasos 2 en adelante de la tasklist (activar,
+coordinar con JD, capturar, apagar, mover, medir, documentar).

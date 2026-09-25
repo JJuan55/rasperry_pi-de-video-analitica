@@ -6,6 +6,7 @@ detector de gestos real sobre cada frame y manda el resultado de vuelta al clien
 
 import asyncio
 import logging
+import os
 import time
 
 import cv2
@@ -30,6 +31,21 @@ def _make_watchdog() -> Watchdog:
     return Watchdog(config.WATCHDOG_TIMEOUT_SECONDS, _on_watchdog_timeout)
 
 
+def _capture_frame_to_disk(capture_dir: str, jpeg_bytes: bytes, label: str) -> None:
+    # CAPTURADOR TEMPORAL — ver nota en config.py y BITACORA.md. Nombre de archivo con
+    # milisegundos epoch (único a ~7fps real) + etiqueta del resultado de ESE frame.
+    safe_label = label.replace("/", "_").replace(" ", "_")
+    filename = f"{int(time.time() * 1000)}__{safe_label}.jpg"
+    path = os.path.join(capture_dir, filename)
+    try:
+        with open(path, "wb") as f:
+            f.write(jpeg_bytes)
+    except OSError as exc:
+        # Errores explícitos, nunca silenciosos (CLAUDE.md sección 6.5) — pero un fallo
+        # de captura (disco lleno, permisos) no debe tumbar la sesión de prueba real.
+        logger.error("[captura] no se pudo guardar %s: %s", path, exc)
+
+
 def _make_on_jpeg_frame(
     detector: GestureDetector,
     cooldown_seconds: float,
@@ -43,11 +59,22 @@ def _make_on_jpeg_frame(
     # cooldown/estabilidad por sesión).
     last_processed_at = None
     stabilizer = GestureStabilizer(window_size=stability_window, min_matches=stability_min_matches)
+    capture_dir = config.CAPTURE_FRAMES_DIR  # leído una vez al armar el callback
 
     async def on_jpeg_frame(jpeg_bytes: bytes, writer: asyncio.StreamWriter) -> None:
         nonlocal last_processed_at
         now = time.monotonic()
-        if last_processed_at is not None and (now - last_processed_at) < cooldown_seconds:
+        in_cooldown = last_processed_at is not None and (now - last_processed_at) < cooldown_seconds
+
+        if in_cooldown:
+            if capture_dir:
+                # CAPTURADOR TEMPORAL: este frame no pasa por el detector (cooldown),
+                # pero igual se guarda para el banco de MediaPipe — etiquetado
+                # "sin_evaluar" (no "sin_gesto") porque la detección real nunca corrió
+                # sobre él; mezclar esas dos etiquetas sería un dato falso, no solo
+                # impreciso. No cambia nada de la lógica de cooldown existente.
+                loop = asyncio.get_running_loop()
+                await loop.run_in_executor(None, _capture_frame_to_disk, capture_dir, jpeg_bytes, "sin_evaluar")
             # Todavía en cooldown (pedido por JD el 2026-09-17, ver BITACORA.md "Fase
             # 8") — se descarta este frame para visión sin correr el detector. El
             # conteo de fps/bytes de Fase 6/7 (on_frame) no se ve afectado.
@@ -59,6 +86,13 @@ def _make_on_jpeg_frame(
         # aparte para no bloquear el loop mientras dura (cientos de ms, ver benchmark
         # de Fase 8 en BITACORA.md).
         result = await loop.run_in_executor(None, detector.detect, jpeg_bytes)
+
+        if capture_dir:
+            # CAPTURADOR TEMPORAL: este frame sí se evaluó -- se guarda con el
+            # resultado real de la detección (gesto+confianza, o "sin_gesto" si no se
+            # reconoció nada). No altera el resultado ni lo que se manda al cliente.
+            label = f"{result.gesture}_{result.confidence:.2f}" if result.gesture is not None else "sin_gesto"
+            await loop.run_in_executor(None, _capture_frame_to_disk, capture_dir, jpeg_bytes, label)
 
         # Fix de falsos positivos sin mano presente (2026-09-18, ver BITACORA.md "Fase
         # 8"): un gesto crudo de un solo frame no se loguea como "Gesto detectado" ni
@@ -109,7 +143,22 @@ def _warm_up(detector: GestureDetector) -> None:
         logger.info("Detector de gestos precalentado (warmup de arranque)")
 
 
+def _prepare_capture_dir_if_configured() -> None:
+    # CAPTURADOR TEMPORAL (ver config.py) -- se crea la carpeta al arrancar, no de
+    # forma perezosa en el primer frame, para poder confirmarla con `ls`/systemctl
+    # status inmediatamente después del reinicio (ver BITACORA.md).
+    if config.CAPTURE_FRAMES_DIR:
+        os.makedirs(config.CAPTURE_FRAMES_DIR, exist_ok=True)
+        logger.warning(
+            "[CAPTURA TEMPORAL ACTIVA] Guardando copia de cada frame en %s -- "
+            "desactivar (unset CVA_CAPTURE_FRAMES_DIR + reinicio) apenas termine la "
+            "sesión de prueba. Ver BITACORA.md, spike MediaPipe.",
+            config.CAPTURE_FRAMES_DIR,
+        )
+
+
 async def run() -> None:
+    _prepare_capture_dir_if_configured()
     detector = GestureDetector(config.YOLO_MODEL, config.MIN_CONFIDENCE)
     _warm_up(detector)
     server = TcpServer(
