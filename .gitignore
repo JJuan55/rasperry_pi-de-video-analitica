@@ -13,6 +13,11 @@ venv/
 # ── Entorno/secretos ──
 .env
 .env.local
+.capture.env
+
+# ── Captura temporal de frames para el spike de MediaPipe (runtime, se mueve al
+# worktree del spike y no se queda ni se versiona aquí — ver BITACORA.md) ──
+captured_frames/
 
 # ── OS ──
 .DS_Store
