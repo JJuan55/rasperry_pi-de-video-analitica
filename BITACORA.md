@@ -1178,10 +1178,15 @@ gateado por una variable de entorno que por defecto está apagada.
       (50 previos + 4 nuevos).
 - [x] Setear la variable, reiniciar el servicio, confirmar con `systemctl status` que
       sigue corriendo normal y que la carpeta se creó.
-- [ ] Avisar (a través de JD) cuando esté listo para la sesión de prueba real.
-- [ ] Al terminar JD: apagar la variable, reiniciar de nuevo, confirmar que volvió al
-      estado normal.
-- [ ] Mover (no copiar) los frames capturados al worktree del spike.
+- [x] Avisar (a través de JD) cuando esté listo para la sesión de prueba real.
+- [x] Al terminar JD: apagar la variable, reiniciar de nuevo, confirmar que volvió al
+      estado normal. Sesión real: 2026-09-25, **2132 frames** capturados en ~5.2 min
+      (2070 `sin_evaluar`, 43 `sin_gesto`, 19 con gesto del sistema actual: 8
+      `dedo_pulgar`, 6 `dedo_menique`, 5 `puño_cerrado`, 0 `palma_abierta` — esa
+      etiqueta es solo del detector YOLO+OpenCV actual al momento de capturar, no
+      condiciona el análisis real con MediaPipe que sigue).
+- [x] Mover (no copiar) los frames capturados al worktree del spike — confirmado que
+      `captured_frames/` ya no existe en el directorio de producción.
 - [ ] Correr HandLandmarker sobre los frames reales: confianza por condición,
       variación frame a frame de landmarks en tramos sostenidos (número concreto),
       confirmar 0 detecciones en los frames "sin mano".
