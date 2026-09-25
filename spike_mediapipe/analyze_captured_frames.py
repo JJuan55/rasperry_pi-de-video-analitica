@@ -10,6 +10,7 @@ No es parte del paquete de producción. Corre con .venv-mediapipe-spike/bin/pyth
 import csv
 import os
 import re
+import sys
 
 import cv2
 import mediapipe as mp
@@ -19,9 +20,11 @@ from mediapipe.tasks.python import vision as mp_vision
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 MODEL_PATH = os.path.join(HERE, "hand_landmarker.task")
-FRAMES_DIR = os.path.join(HERE, "captured_frames_2026-09-25")
-RESULTS_CSV = os.path.join(HERE, "captured_frames_analysis.csv")
-ANNOTATED_DIR = os.path.join(HERE, "captured_frames_annotated")
+# Uso: python analyze_captured_frames.py [sufijo_de_sesion]
+SESSION_SUFFIX = sys.argv[1] if len(sys.argv) > 1 else "2026-09-25"
+FRAMES_DIR = os.path.join(HERE, f"captured_frames_{SESSION_SUFFIX}")
+RESULTS_CSV = os.path.join(HERE, f"captured_frames_analysis_{SESSION_SUFFIX}.csv")
+ANNOTATED_DIR = os.path.join(HERE, f"captured_frames_annotated_{SESSION_SUFFIX}")
 
 # Máximo hueco (en frames consecutivos SIN mano detectada) que todavía se considera
 # parte del mismo segmento -- tolera 1-2 misses puntuales de MediaPipe sin partir un

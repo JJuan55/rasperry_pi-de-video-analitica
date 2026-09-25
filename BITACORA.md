@@ -1506,3 +1506,72 @@ window normales) le puso a cada frame que sí evaluó. De 2132 frames: 2070
 vivo con el sistema actual, en toda la sesión). MediaPipe, corriendo sobre el 100% de
 los frames sin cooldown y sin heurística de piel/movimiento, encontró una mano en el
 92.7% y clasificó alguno de los 4 gestos con confianza ≥0.92 en el 70% del total.
+
+---
+
+## Segunda sesión de captura — protocolo mejorado (2026-09-25, misma tarde)
+
+JD probó el sistema **de producción** en vivo (todavía YOLO+OpenCV — MediaPipe nunca
+se desplegó, esto sigue siendo Fase A offline) y confirmó en carne propia lo que ya
+había salido en el análisis de la primera sesión: no reconoce `palma_abierta`, se
+queda saltando entre `dedo_menique`/`dedo_pulgar`. No es un hallazgo nuevo sobre
+MediaPipe, es la razón por la que se está evaluando la alternativa. A partir de eso,
+JD pidió repetir la **captura** (no la prueba en vivo) con un protocolo mejorado:
+sacar la mano de cuadro 2-3s antes de cada cambio de gesto, en vez de cambiar con la
+mano siempre en pantalla como en la primera sesión.
+
+**Captura:** misma infraestructura (`.capture.env` + `EnvironmentFile`, sin `sudo`),
+activada y desactivada de inmediato al terminar. **3727 frames, ~9.1 minutos.**
+Movidos a `spike_mediapipe/captured_frames_2026-09-25_v2/` (gitignorado, igual que la
+primera sesión).
+
+### Resultado: la segmentación automática por "mano presente/ausente" ya alcanza sola
+
+A diferencia de la primera sesión (4 segmentos de mano-presente, dos de ellos de más
+de 2 minutos cada uno porque la mano nunca salía de cuadro), esta vez
+`analyze_captured_frames.py` encontró **22 segmentos limpios** de mano presente
+directamente, sin necesitar la heurística de clasificación de dedos para separarlos.
+`segment_by_gesture.py` sobre esos segmentos dio **21 de 21 tramos coincidiendo
+limpiamente con uno de los 4 gestos del catálogo — cero transiciones ambiguas** (en la
+primera sesión hubo 2 tramos "otro" sin clasificar). Confirmado visualmente abriendo
+dos ejemplos más (`corrida_0_palma_abierta`, `corrida_16_dedo_menique`) — coinciden
+exactamente.
+
+| Métrica | Sesión 1 (mano nunca sale de cuadro) | Sesión 2 (mano sale entre gestos) |
+|---|---|---|
+| Frames totales | 2132 | 3727 |
+| Duración | ~5.2 min | ~9.1 min |
+| Con mano detectada | 92.7% | 73.9% (más bajo *a propósito* — más huecos deliberados) |
+| Segmentos limpios (auto, sin heurística) | 4 (2 de ellos >2 min, mezclando gestos) | **22** |
+| Tramos de gesto sostenido identificados | 22 (20 limpios + 2 "otro") | **21 (21 limpios, 0 "otro")** |
+
+### Tabla de confianza y estabilidad — sesión 2
+
+| Gesto | Tramos | Frames | Duración total | Confianza (min/media/max) | Mov. landmarks medio (min/media/max entre tramos) |
+|---|---|---|---|---|---|
+| `puño_cerrado` | 5 | 553 | 80.8s | 0.983 / 0.994 / 0.997 | 0.87 / 2.20 / 2.95 px |
+| `palma_abierta` | 5 | 687 | 100.3s | 0.966 / 0.972 / 0.983 | 1.03 / 1.41 / 2.16 px |
+| `dedo_pulgar` | 6 | 351 | 52.6s | 0.965 / 0.978 / 0.992 | 1.72 / 2.20 / 3.01 px |
+| `dedo_menique` | 5 | 439 | 63.3s | 0.988 / 0.994 / 0.999 | 1.37 / 1.46 / 1.62 px |
+
+Confianza mínima de cualquier tramo: **0.965** (vs. 0.920 en la sesión 1) —
+consistentemente más alta y con menos dispersión. Movimiento medio de landmarks
+también más bajo y estable (1.4-2.2px de media vs. 1.9-3.2px en la sesión 1).
+
+### (c) Sin mano — verificación otra vez, con muchos más datos
+
+974 de 3727 frames sin mano (26.1%). De esos, **20 rachas consecutivas ≥10 frames**
+(908 frames, ~131.3s combinados) — todas las transiciones deliberadas entre gestos.
+**100% de esos 974 frames con `num_hands == 0`, cero falsos positivos.**
+
+### Conclusión de las dos sesiones combinadas
+
+46 gestos sostenidos identificados y confirmados en total (25 de la sesión 1 + 21 de
+la sesión 2, aunque 2 de la sesión 1 fueron transiciones sin clasificar), cubriendo
+los 4 gestos del catálogo repetidas veces, con confianza siempre ≥0.92 y típicamente
+>0.97. El protocolo de sacar la mano entre gestos no cambió la calidad de detección de
+MediaPipe en sí (la confianza fue igual de alta o mejor) — lo que cambió es que ya no
+hace falta ninguna heurística de clasificación para saber dónde empieza y termina cada
+gesto, algo que sería necesario resolver de todas formas para una Fase B real (el
+`module_id`/estado de sesión ya es un hueco conocido del proyecto, sección 4.5 de
+`CLAUDE.md`).

@@ -11,6 +11,7 @@ los tramos reales que JD sostuvo cada gesto.
 
 import os
 import re
+import sys
 
 import cv2
 import mediapipe as mp
@@ -20,8 +21,11 @@ from mediapipe.tasks.python import vision as mp_vision
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 MODEL_PATH = os.path.join(HERE, "hand_landmarker.task")
-FRAMES_DIR = os.path.join(HERE, "captured_frames_2026-09-25")
-ANNOTATED_DIR = os.path.join(HERE, "captured_frames_annotated")
+# Uso: python segment_by_gesture.py [sufijo_de_sesion]
+# Sin argumento, usa la primera sesión (2026-09-25) por compatibilidad.
+SESSION_SUFFIX = sys.argv[1] if len(sys.argv) > 1 else "2026-09-25"
+FRAMES_DIR = os.path.join(HERE, f"captured_frames_{SESSION_SUFFIX}")
+ANNOTATED_DIR = os.path.join(HERE, f"captured_frames_annotated_{SESSION_SUFFIX}")
 
 WRIST, THUMB_MCP, THUMB_TIP = 0, 2, 4
 FINGER_MCP_TIP = {

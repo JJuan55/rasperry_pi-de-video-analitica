@@ -16,9 +16,10 @@ venv/
 spike_mediapipe/images/
 # Fotos reales de una persona identificable (JD) -- crudas y anotadas con landmarks.
 # Se quedan locales en esta Pi para que JD las revise, nunca al control de versiones
-# (ver BITACORA.md, sesión de captura del 2026-09-25).
-spike_mediapipe/captured_frames_2026-09-25/
-spike_mediapipe/captured_frames_annotated/
+# (ver BITACORA.md, sesiones de captura del 2026-09-25). Patrón amplio a propósito
+# para cubrir cualquier sesión futura sin tener que acordarse de actualizar esto.
+spike_mediapipe/captured_frames_2026-09-25*/
+spike_mediapipe/captured_frames_annotated*/
 
 # ── Entorno/secretos ──
 .env
