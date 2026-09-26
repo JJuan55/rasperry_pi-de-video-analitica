@@ -1154,6 +1154,7 @@ de los landmarks frame a frame con una mano real quieta, y si el modelo
 para decidir si se justifica seguir a las Fases B en adelante — no una implementación
 funcional todavía.
 
+fase8-mediapipe-viabilidad
 ### Resultados Fase A — datos crudos (2026-09-21, rama `spike/fase8-mediapipe-viabilidad`)
 
 Hardware: la misma Pi 5 de siempre (`Model: Raspberry Pi 5 Model B Rev 1.1`, 4 núcleos,
@@ -1375,3 +1376,106 @@ sin necesidad de estar ahí.
 corre en `~/video_analitica/cva-pi-repo-spike`** — venv propio
 (`.venv-mediapipe-spike/`), rama propia, sin tocar en absoluto el directorio ni el
 `.venv` que usa `cva-gesture-bridge.service`.
+=======
+---
+
+## Capturador temporal de frames reales para el spike de MediaPipe (2026-09-25)
+
+Autorizado explícitamente por JD para destrabar los puntos 2 y 4 de la Fase A del
+spike (banco de imágenes reales y estabilidad temporal de landmarks), que llevaban
+bloqueados desde el 2026-09-21 por falta de acceso a cámara. En vez de darle acceso de
+cámara a esta sesión, se agrega un capturador temporal a `main.py` de producción,
+gateado por una variable de entorno que por defecto está apagada.
+
+### Tasklist
+
+- [x] `config.CAPTURE_FRAMES_DIR` (env `CVA_CAPTURE_FRAMES_DIR`) — sin setear, cero
+      cambio de comportamiento.
+- [x] `main.py`: al procesar cada frame, si la variable está seteada, guardar además
+      una copia del JPEG crudo a disco, con nombre `{epoch_ms}__{etiqueta}.jpg`. Sin
+      tocar la lógica de cooldown/detección/stabilizer existente.
+- [x] Tests nuevos (`tests/test_main.py`, 4 casos) — capturador apagado no escribe
+      nada; frame procesado se guarda con su gesto real o `sin_gesto`; frame saltado
+      por cooldown se guarda como `sin_evaluar` (no `sin_gesto` — nunca se evaluó,
+      etiquetarlo como "sin gesto" sería un dato falso). `pytest`: **54 passed**
+      (50 previos + 4 nuevos).
+- [x] Setear la variable, reiniciar el servicio, confirmar con `systemctl status` que
+      sigue corriendo normal y que la carpeta se creó.
+- [x] Avisar (a través de JD) cuando esté listo para la sesión de prueba real.
+- [x] Al terminar JD: apagar la variable, reiniciar de nuevo, confirmar que volvió al
+      estado normal. Sesión real: 2026-09-25, **2132 frames** capturados en ~5.2 min
+      (2070 `sin_evaluar`, 43 `sin_gesto`, 19 con gesto del sistema actual: 8
+      `dedo_pulgar`, 6 `dedo_menique`, 5 `puño_cerrado`, 0 `palma_abierta` — esa
+      etiqueta es solo del detector YOLO+OpenCV actual al momento de capturar, no
+      condiciona el análisis real con MediaPipe que sigue).
+- [x] Mover (no copiar) los frames capturados al worktree del spike — confirmado que
+      `captured_frames/` ya no existe en el directorio de producción.
+- [ ] Correr HandLandmarker sobre los frames reales: confianza por condición,
+      variación frame a frame de landmarks en tramos sostenidos (número concreto),
+      confirmar 0 detecciones en los frames "sin mano".
+- [ ] Documentar en `BITACORA.md` (esta, o la del worktree del spike) los números
+      crudos y al menos una imagen de ejemplo por gesto con los landmarks dibujados.
+
+### Detalle de la implementación
+
+- `config.py`: `CAPTURE_FRAMES_DIR = os.environ.get("CVA_CAPTURE_FRAMES_DIR")` — sin
+  default, `None` si no se setea.
+- `main.py`:
+  - `_prepare_capture_dir_if_configured()`: crea la carpeta al arrancar (no de forma
+    perezosa en el primer frame) para poder confirmarla enseguida tras el reinicio;
+    loguea un `WARNING` explícito ("CAPTURA TEMPORAL ACTIVA") recordando apagarla.
+  - `_capture_frame_to_disk()`: escribe el JPEG crudo tal cual llegó (sin
+    recodificar). Un fallo de escritura (disco lleno, permisos) se loguea como
+    `ERROR` explícito pero no interrumpe la sesión de prueba real — no vale la pena
+    tumbar la conexión del cliente por un problema de captura, que es solo
+    instrumentación temporal.
+  - Dentro de `on_jpeg_frame`, la captura corre en `run_in_executor` (I/O de disco,
+    igual criterio que la inferencia) tanto para el frame que sí se procesa (etiqueta
+    = gesto real o `sin_gesto`) como para el que cae en cooldown (etiqueta
+    `sin_evaluar`, para no mezclar "no se detectó nada" con "nunca se evaluó").
+  - `capture_dir` se lee de `config` **una sola vez**, al armar el closure
+    (`_make_on_jpeg_frame`), no en cada frame — si se cambiara la variable de entorno
+    en caliente no se notaría hasta el próximo reinicio, que es exactamente el
+    comportamiento esperado (systemd solo relee el entorno al reiniciar el proceso).
+
+**Pendiente:** commitear esto, luego los pasos 2 en adelante de la tasklist (activar,
+coordinar con JD, capturar, apagar, mover, medir, documentar).
+
+### Mejora de infraestructura — `EnvironmentFile` en el drop-in del servicio (2026-09-25)
+
+Para activar `CVA_CAPTURE_FRAMES_DIR` en el proceso real (corre bajo `systemd`) hacía
+falta editar `/etc/systemd/system/cva-gesture-bridge.service`, propiedad de `root` —
+esta sesión no tiene `sudo` interactivo (mismo bloqueo que ya había con el nivel de
+log). En vez de pedirle a JD `sudo` cada vez que haga falta una variable nueva, se le
+pidió un cambio de infraestructura de una sola vez: JD corrió
+`sudo systemctl edit cva-gesture-bridge.service` y agregó un drop-in
+(`/etc/systemd/system/cva-gesture-bridge.service.d/override.conf`):
+
+```ini
+[Service]
+EnvironmentFile=-/home/david_cardenas/video_analitica/rasperry_pi-de-video-analitica/.capture.env
+```
+
+(el `-` inicial = "si el archivo no existe, seguir sin error"). Tomó dos intentos: el
+primero guardó el drop-in vacío (no se escribió nada en la sección editable), el
+segundo tuvo un typo (`EnviromentFile`, sin la "n" de "Environment"). Confirmado en el
+tercer intento con `systemctl show -p EnvironmentFiles` (mostraba la ruta correcta) y
+`systemctl status` (sección `Drop-In:` visible).
+
+**De ahora en adelante**, activar/desactivar variables de entorno para este servicio
+(esta captura, o futuros ajustes como el nivel de log) no necesita `sudo` — alcanza con
+escribir/editar `.capture.env` (archivo propio de `david_cardenas`, gitignorado) y
+reiniciar matando el PID (`Restart=always` lo revive leyendo el archivo actualizado).
+
+**Confirmación real de la activación:**
+- `cat /proc/<PID>/environ` del proceso nuevo (PID `71566`) muestra
+  `CVA_CAPTURE_FRAMES_DIR=/home/david_cardenas/video_analitica/rasperry_pi-de-video-analitica/captured_frames`.
+- La carpeta `captured_frames/` se creó al arrancar (confirmado con `ls`).
+- El log real tiene la línea `WARNING ... [CAPTURA TEMPORAL ACTIVA] Guardando copia de
+  cada frame en .../captured_frames -- desactivar...`.
+- `systemctl status`: `Active: active (running)`, sin errores.
+
+**Esperando que JD confirme que está listo para hacer la sesión de prueba real** (los
+4 gestos, distintas distancias, un tono de piel distinto si consigue a alguien, y unos
+segundos sin mano) — avisar apenas termine para apagar la captura de inmediato.
+ main

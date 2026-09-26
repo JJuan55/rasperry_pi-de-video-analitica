@@ -47,3 +47,10 @@ GESTURE_COOLDOWN_SECONDS = float(os.environ.get("CVA_GESTURE_COOLDOWN_SECONDS", 
 # real de AC3 (<1.5s), el ajuste es bajar el cooldown, no estos dos a la vez sin medir.
 GESTURE_STABILITY_WINDOW = int(os.environ.get("CVA_GESTURE_STABILITY_WINDOW", "3"))
 GESTURE_STABILITY_MIN_MATCHES = int(os.environ.get("CVA_GESTURE_STABILITY_MIN_MATCHES", "2"))
+
+# CAPTURADOR TEMPORAL (2026-09-25, ver BITACORA.md "Fase 8" / spike MediaPipe) — banco
+# de frames reales para el spike, autorizado por JD explícitamente, con fecha de
+# vencimiento: se usa una sola sesión de prueba y se apaga. Sin setear (caso normal),
+# CERO cambio de comportamiento — ningún archivo nuevo importa ni ninguna rama de
+# código nueva se ejecuta si esto queda en None.
+CAPTURE_FRAMES_DIR = os.environ.get("CVA_CAPTURE_FRAMES_DIR")

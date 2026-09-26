@@ -191,3 +191,68 @@ async def test_frame_without_gesture_does_not_confirm_but_does_not_erase_the_win
 
     # El puño_cerrado del primer frame sigue en la ventana (tamaño 3) -> 2 de 2.
     assert len(writer.lines) == 1
+
+
+# --- Capturador temporal de frames (2026-09-25, ver BITACORA.md "Fase 8" / spike
+# MediaPipe) -- config.CAPTURE_FRAMES_DIR se parchea vía monkeypatch, nunca vía env
+# var real, para no tocar el estado del proceso de test. ---
+
+
+async def test_capture_disabled_by_default_writes_no_file(tmp_path, monkeypatch):
+    monkeypatch.setattr(main_module.config, "CAPTURE_FRAMES_DIR", None)
+    detector = _StubDetector([GestureResult("puño_cerrado", 0.9, 0)])
+    on_jpeg_frame = main_module._make_on_jpeg_frame(
+        detector, cooldown_seconds=0.0, stability_window=1, stability_min_matches=1
+    )
+
+    await on_jpeg_frame(b"frame", _FakeWriter())
+
+    assert list(tmp_path.iterdir()) == []
+
+
+async def test_capture_saves_processed_frame_with_gesture_label(tmp_path, monkeypatch):
+    monkeypatch.setattr(main_module.config, "CAPTURE_FRAMES_DIR", str(tmp_path))
+    detector = _StubDetector([GestureResult("puño_cerrado", 0.87, 0)])
+    on_jpeg_frame = main_module._make_on_jpeg_frame(
+        detector, cooldown_seconds=0.0, stability_window=1, stability_min_matches=1
+    )
+
+    await on_jpeg_frame(b"contenido-jpeg-falso", _FakeWriter())
+
+    files = list(tmp_path.iterdir())
+    assert len(files) == 1
+    assert files[0].name.endswith("__puño_cerrado_0.87.jpg")
+    assert files[0].read_bytes() == b"contenido-jpeg-falso"
+
+
+async def test_capture_saves_processed_frame_without_gesture_as_sin_gesto(tmp_path, monkeypatch):
+    monkeypatch.setattr(main_module.config, "CAPTURE_FRAMES_DIR", str(tmp_path))
+    detector = _StubDetector([GestureResult(None, 0.0, 2)])
+    on_jpeg_frame = main_module._make_on_jpeg_frame(
+        detector, cooldown_seconds=0.0, stability_window=1, stability_min_matches=1
+    )
+
+    await on_jpeg_frame(b"frame", _FakeWriter())
+
+    files = list(tmp_path.iterdir())
+    assert len(files) == 1
+    assert files[0].name.endswith("__sin_gesto.jpg")
+
+
+async def test_capture_saves_cooldown_skipped_frame_as_sin_evaluar_not_sin_gesto(tmp_path, monkeypatch):
+    # El frame saltado por cooldown nunca pasó por el detector -- etiquetarlo
+    # "sin_gesto" sería un dato falso (implicaría que sí se evaluó).
+    monkeypatch.setattr(main_module.config, "CAPTURE_FRAMES_DIR", str(tmp_path))
+    detector = _StubDetector([GestureResult("puño_cerrado", 0.9, 0)])
+    on_jpeg_frame = main_module._make_on_jpeg_frame(
+        detector, cooldown_seconds=5.0, stability_window=1, stability_min_matches=1
+    )
+
+    await on_jpeg_frame(b"frame1", _FakeWriter())  # se procesa, consume el único resultado
+    await on_jpeg_frame(b"frame2", _FakeWriter())  # cae en cooldown
+
+    files = [f.name for f in tmp_path.iterdir()]
+    assert len(files) == 2
+    assert any(f.endswith("__puño_cerrado_0.90.jpg") for f in files)
+    assert any(f.endswith("__sin_evaluar.jpg") for f in files)
+    assert detector.calls == 1  # el segundo frame nunca llamó a detect()
