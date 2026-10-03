@@ -16,9 +16,12 @@ venv/
 spike_mediapipe/images/
 # Fotos reales de una persona identificable (JD) -- crudas y anotadas con landmarks.
 # Se quedan locales en esta Pi para que JD las revise, nunca al control de versiones
-# (ver BITACORA.md, sesiones de captura del 2026-09-25). Patrón amplio a propósito
-# para cubrir cualquier sesión futura sin tener que acordarse de actualizar esto.
-spike_mediapipe/captured_frames_2026-09-25*/
+# (ver BITACORA.md, sesiones de captura desde 2026-09-25). Patrón amplio a propósito
+# (cualquier fecha) para cubrir cualquier sesión futura sin tener que acordarse de
+# actualizar esto -- confirmado necesario el 2026-10-02, la primera versión del
+# patrón solo cubría la fecha 2026-09-25 y una sesión posterior (captured_frames_
+# 2026-10-02_menique/) no habría quedado cubierta.
+spike_mediapipe/captured_frames_*/
 spike_mediapipe/captured_frames_annotated*/
 
 # ── Entorno/secretos ──
