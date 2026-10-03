@@ -1374,18 +1374,18 @@ verificados con el `GestureDetector` real de esta fase, cada uno con una instanc
 | `fixture_puno_cerrado.jpg`      | puño cerrado                  | `puño_cerrado`               | 0.9983    |
 | `fixture_palma_abierta.jpg`     | palma abierta                 | `palma_abierta`              | 0.9678    |
 | `fixture_dedo_pulgar.jpg`       | pulgar arriba                 | `dedo_pulgar`                | 0.9894    |
-| `fixture_dedo_menique.jpg`      | un solo dedo extendido (ver nota) | `dedo_menique`            | 0.9992    |
+| `fixture_dedo_menique.jpg`      | meñique (reemplazado 2026-10-02, ver sección abajo) | `dedo_menique` | 0.9952 |
 | `persona_cara_sin_mano.jpg`     | cara+torso real, sin mano posada, redimensionado a 320x240 (resolución real del cliente) | `None` | 0.0 |
 | `persona_torso_sin_mano_1.jpg`  | torso real, sin mano en cuadro (frame real de una racha de 96 frames consecutivos con 0 manos, sesión 2 de Fase A) | `None` | 0.0 |
 | `persona_torso_sin_mano_2.jpg`  | ídem, otro frame de la misma racha | `None` | 0.0 |
 | frame negro sintético (240x320) | vacío                          | `None`                        | 0.0       |
 
-**Nota sobre `fixture_dedo_menique.jpg`:** el dedo levantado no se pudo confirmar a
-ojo con certeza total desde la foto plana (la rotación de la mano en ese frame hace
-ambiguo si es el índice o el meñique visualmente) — pero la clasificación geométrica
-de MediaPipe (que sí tiene profundidad 3D real, no una foto plana) es consistente y
-de alta confianza (0.9992). Se acepta como fixture de `dedo_menique` con esta
-salvedad documentada explícitamente, no en silencio.
+**Nota histórica sobre `fixture_dedo_menique.jpg` (resuelta, ver sección siguiente):**
+la primera versión de este fixture (confianza 0.9992) quedó con una salvedad
+documentada — el dedo levantado no se podía confirmar a ojo con certeza total desde
+la foto plana, por la rotación de la mano en ese frame. JD pidió una sesión nueva
+específicamente para resolver esto, y el fixture fue reemplazado — ver "Recaptura de
+`dedo_menique` sin ambigüedad visual (2026-10-02)" más abajo.
 
 **Caso histórico investigado y resuelto — cara/torso como falso positivo (pedido
 explícito de JD, `persona_cara_sin_mano.jpg` es la misma imagen que `zidane.jpg` del
@@ -1443,14 +1443,62 @@ documentado en el docstring del archivo.
 los fixtures reales de arriba). Suite completa del repo: **63 passed, 0 failed**
 (`.venv-fase-b/bin/pytest -q`).
 
+### Recaptura de `dedo_menique` sin ambigüedad visual (2026-10-02)
+
+JD pidió resolver la salvedad documentada arriba con una sesión de captura nueva,
+corta y puntual (mismo procedimiento ya usado dos veces en Fase A: descomentar
+`CVA_CAPTURE_FRAMES_DIR` en `.capture.env`, `sudo systemctl restart
+cva-gesture-bridge.service`, grabar, comentar de nuevo, reiniciar otra vez).
+
+**Primeros dos intentos no sirvieron** — JD hizo el gesto (puño con el meñique
+estirado) pero con la mano de canto/rotada hacia la cámara, igual que el fixture
+original: sin ver el pulgar en el cuadro, seguía sin poder confirmarse a ojo cuál
+dedo era. Se le pidió un tercer método, más simple y sin depender de rotar la
+muñeca: **mano abierta de frente a la cámara (palma visible) → ir doblando un dedo a
+la vez (pulgar, índice, medio, anular) hasta dejar solo el meñique**, repetido con
+ambas manos. Esto sí funcionó: dio una secuencia completa con un frame de referencia
+de palma abierta, lo que permite rastrear la posición del dedo que queda al final
+contra esa referencia, en vez de depender de una sola foto aislada.
+
+**Verificación, no solo inspección visual de una foto:** se comparó la posición del
+dedo levantado en el frame final contra la posición del meñique en el frame de
+palma abierta de la misma secuencia (mismo encuadre, mismo brazo levantado) — cae
+exactamente en el lugar del dedo más alejado del pulgar. Además, se corrió el
+`GestureDetector` real contra 14 frames candidatos (7 por mano, vecinos del momento
+de "1 dedo" en cada secuencia): **13 de 14 clasificaron `dedo_menique` con confianza
+entre 0.97 y 0.995** (el único que no, dio 2 dedos extendidos — frame de transición,
+descartado). Se eligió el de mayor confianza de la primera mano:
+`1790997084005__sin_gesto.jpg` (confianza 0.9952).
+
+**Reemplazado `tests/fixtures_real/fixture_dedo_menique.jpg`** con este frame.
+Vuelto a correr `GestureDetector.detect()` contra el nuevo fixture (instancia
+fresca, mismo criterio que el resto): `gesture=dedo_menique, confidence=0.9952,
+extended_fingers=1`. Quitada la salvedad de ambigüedad del comentario del test
+correspondiente en `tests/test_detector.py`, reemplazada por la explicación de cómo
+se verificó esta vez.
+
+**Suite completa: 63 passed, 0 failed** — mismo conteo que antes del reemplazo, sin
+romper nada.
+
+**Los 1946 frames de la sesión** (dos intentos fallidos + el exitoso, todos juntos
+porque el capturador no se desactivó entre intentos) se **movieron** (no copiaron) a
+`~/video_analitica/cva-pi-repo-spike/spike_mediapipe/captured_frames_2026-10-02_menique/`
+— mismo patrón que las dos sesiones de Fase A, gitignorado, nunca al repo. El
+patrón de `.gitignore` de esa rama (`spike/fase8-mediapipe-viabilidad`) solo cubría
+la fecha `2026-09-25` explícitamente — corregido a cualquier fecha
+(`captured_frames_*/`) antes de hacer cualquier `git add`, confirmado con `git
+status --ignored` que las 3 carpetas de sesiones reales quedan ignoradas. Commit
+`ee6eba1` en esa rama.
+
+Capturador desactivado y confirmado contra el proceso real (`CVA_CAPTURE_FRAMES_DIR`
+ya no está en el entorno del PID activo) al cierre de esta sesión.
+
 ### Pendiente antes de cerrar Fase B
 
-- Push de la rama (bloqueado por credenciales, igual que el housekeeping — JD debe
-  correrlo directamente).
+- Push de ambas ramas (`fase8-fase-b-mediapipe-pipeline` y el fix de `.gitignore` en
+  `spike/fase8-mediapipe-viabilidad`) — bloqueado por credenciales, igual que el
+  housekeeping anterior; JD debe correrlo directamente.
 - Autorización explícita de JD antes de: tocar el `.venv` de producción, reiniciar
-  `cva-gesture-bridge.service`, o desplegar este código — nada de eso se hizo ni se
-  hará sin ese aviso previo.
-- Posible: capturar un frame específico de `dedo_menique` sin la ambigüedad visual
-  documentada arriba, si JD lo considera necesario (requeriría reactivar el
-  capturador temporal, con autorización explícita, igual que las dos sesiones de
-  Fase A).
+  `cva-gesture-bridge.service` para desplegar (el reinicio para
+  activar/desactivar el capturador ya fue autorizado y usado, eso es distinto), o
+  desplegar este código — nada de eso se hizo ni se hará sin ese aviso previo.

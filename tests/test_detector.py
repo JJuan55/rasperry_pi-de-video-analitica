@@ -351,6 +351,14 @@ def test_real_fixture_thumb_up_is_dedo_pulgar(fresh_detector):
 
 @requires_real_fixtures
 def test_real_fixture_pinky_up_is_dedo_menique(fresh_detector):
+    # Fixture reemplazado 2026-10-02: el original (Fase B inicial) quedó con una
+    # salvedad documentada -- la rotación de la mano no permitía confirmar a ojo si
+    # era índice o meñique. Este nuevo fixture se grabó con una secuencia completa
+    # (palma abierta -> ir doblando dedos uno por uno, palma siempre de frente a la
+    # cámara) que sirve de referencia posicional: el dedo que queda al final se
+    # verificó comparando su posición contra el frame de palma abierta de la misma
+    # sesión -- cae exactamente donde estaba el meñique, el dedo más alejado del
+    # pulgar. Sin ambigüedad esta vez. Ver BITACORA.md "Fase B".
     result = fresh_detector.detect(_read_fixture("fixture_dedo_menique.jpg"))
     assert result.gesture == GESTURE_DEDO_MENIQUE
     assert result.confidence >= 0.9
