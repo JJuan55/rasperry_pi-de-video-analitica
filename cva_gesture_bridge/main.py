@@ -53,6 +53,7 @@ def _make_on_jpeg_frame(
     cooldown_seconds: float,
     stability_window: int,
     stability_min_matches: int,
+    stability_release_after_misses: int,
 ):
     # last_processed_at y stabilizer viven en este closure, creado una sola vez por
     # arranque del bridge — tanto el cooldown como la ventana de estabilidad son
@@ -60,7 +61,11 @@ def _make_on_jpeg_frame(
     # uso real de este proyecto, una sola conexión persistente por sesión, equivale a
     # cooldown/estabilidad por sesión).
     last_processed_at = None
-    stabilizer = GestureStabilizer(window_size=stability_window, min_matches=stability_min_matches)
+    stabilizer = GestureStabilizer(
+        window_size=stability_window,
+        min_matches=stability_min_matches,
+        release_after_misses=stability_release_after_misses,
+    )
     capture_dir = config.CAPTURE_FRAMES_DIR  # leído una vez al armar el callback
 
     async def on_jpeg_frame(jpeg_bytes: bytes, writer: asyncio.StreamWriter) -> None:
@@ -177,6 +182,7 @@ async def run() -> None:
             config.GESTURE_COOLDOWN_SECONDS,
             config.GESTURE_STABILITY_WINDOW,
             config.GESTURE_STABILITY_MIN_MATCHES,
+            config.GESTURE_RELEASE_AFTER_MISSES,
         ),
     )
     await server.start()

@@ -40,28 +40,42 @@ MEDIAPIPE_MIN_TRACKING_CONFIDENCE = float(
 # ajusta con datos reales de la validación manual documentada en BITACORA.md.
 MIN_CONFIDENCE = float(os.environ.get("CVA_MIN_CONFIDENCE", "0.5"))
 
-# Tiempo mínimo entre que se procesa un gesto (se corre YOLO+OpenCV sobre un frame) y
-# se procesa el siguiente — pedido por JD el 2026-09-17 tras la primera prueba manual,
-# para no correr el detector en cada frame (~2.5 fps real). Ver BITACORA.md "Fase 8".
-GESTURE_COOLDOWN_SECONDS = float(os.environ.get("CVA_GESTURE_COOLDOWN_SECONDS", "5"))
+# Tiempo mínimo entre que se procesa un frame y se procesa el siguiente -- fijado en
+# 5s en la Fase 8 original (YOLO+OpenCV, ~440ms/frame, para no saturar la Pi
+# evaluando casi todo). Con MediaPipe (Fase B) esa razón ya no aplica igual: medido
+# con carga sostenida real en esta Pi (Fase C2, `benchmarks/sustained_load.py`,
+# 7805 frames reales de las 3 sesiones de captura, 4.5 min seguidos, un solo
+# proceso, sin cooldown artificial) -- latencia avg=34.5ms p95=46.0ms p99=68.7ms
+# max=111.9ms, CPU ~100% de 1 solo núcleo de 4 (sostenido, sin degradarse), RSS
+# estable (209->214MB, sin fuga). El cliente real manda frames a ~7fps (~143ms entre
+# frames) -- incluso el peor frame medido (111.9ms) deja margen real (~1.3x), y el
+# caso típico deja 3-4x de margen. La Pi aguanta holgado evaluar cada frame que
+# llega -- cooldown eliminado (0.0). Ver BITACORA.md "Fase C2" para la corrida
+# completa.
+GESTURE_COOLDOWN_SECONDS = float(os.environ.get("CVA_GESTURE_COOLDOWN_SECONDS", "0.0"))
 
-# Ventana deslizante de estabilidad: un gesto se confirma (loguea "Gesto detectado" y
-# manda send_line) si aparece al menos GESTURE_STABILITY_MIN_MATCHES veces dentro de
-# las últimas GESTURE_STABILITY_WINDOW detecciones *procesadas* — fix de falsos
-# positivos sin mano presente (2026-09-18, ver BITACORA.md "Fase 8").
+# GestureStabilizer (ver detector.py) -- ventana deslizante por mayoría CON
+# histéresis, rediseñado en Fase C2 sobre el esquema de Fase 8 (ventana de 3, 2
+# coincidencias, sin histéresis -- un solo frame sin gesto ya tiraba la confirmación
+# a None, lo que con cooldown=5s tardaba ~15s en confirmar un gesto real sostenido:
+# 3 detecciones procesadas × 5s).
 #
-# Rediseñado el mismo día (todavía dentro de Fase 8): la primera versión exigía una
-# racha EXACTA de N seguidas, pero los datos reales mostraron que una mano real
-# sostenida quieta igual varía de una muestra a la siguiente (ruido normal de la
-# máscara de piel) — con "3 seguidas exactas" la confirmación casi nunca se
-# completaba. Con "2 de las últimas 3" (default) se tolera 1 muestra ruidosa.
+# Calibrado con datos reales, no a ojo (Fase C2, `benchmarks/analyze_raw_stability.py`
+# + `inspect_noise_composition.py`, sobre 40 tramos de gesto realmente sostenido en
+# las 3 sesiones de captura): el 100% del ruido crudo por frame dentro de un gesto
+# sostenido real fue `None` (mano perdida un instante), nunca otro gesto en
+# conflicto -- la racha de ruido más larga medida fue 14 frames seguidos.
 #
-# Cada detección procesada está ~GESTURE_COOLDOWN_SECONDS aparte, así que confirmar
-# toma aproximadamente GESTURE_STABILITY_WINDOW * GESTURE_COOLDOWN_SECONDS segundos de
-# gesto sostenido en el peor caso — si eso resulta demasiado lento en la validación
-# real de AC3 (<1.5s), el ajuste es bajar el cooldown, no estos dos a la vez sin medir.
-GESTURE_STABILITY_WINDOW = int(os.environ.get("CVA_GESTURE_STABILITY_WINDOW", "3"))
-GESTURE_STABILITY_MIN_MATCHES = int(os.environ.get("CVA_GESTURE_STABILITY_MIN_MATCHES", "2"))
+# GESTURE_STABILITY_WINDOW/MIN_MATCHES (5 de 7, ~71%) controlan CONFIRMAR un gesto
+# nuevo -- con cooldown≈0 y ~143ms real entre frames del cliente, eso es ~715ms en
+# el caso típico, dentro de AC3 (<1.5s) con margen real medido (ver "Simulación de
+# tiempo de confirmación" en BITACORA.md). GESTURE_RELEASE_AFTER_MISSES controla
+# SOLTAR un gesto ya confirmado (histéresis): no se suelta por una racha corta de
+# ruido, solo tras esa cantidad de observaciones seguidas que no sean el gesto
+# confirmado -- el default (20) deja margen real sobre el peor caso medido (14).
+GESTURE_STABILITY_WINDOW = int(os.environ.get("CVA_GESTURE_STABILITY_WINDOW", "7"))
+GESTURE_STABILITY_MIN_MATCHES = int(os.environ.get("CVA_GESTURE_STABILITY_MIN_MATCHES", "5"))
+GESTURE_RELEASE_AFTER_MISSES = int(os.environ.get("CVA_GESTURE_RELEASE_AFTER_MISSES", "20"))
 
 # CAPTURADOR TEMPORAL (2026-09-25, ver BITACORA.md "Fase 8" / spike MediaPipe) — banco
 # de frames reales para el spike, autorizado por JD explícitamente, con fecha de

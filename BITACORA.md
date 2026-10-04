@@ -1502,3 +1502,154 @@ ya no está en el entorno del PID activo) al cierre de esta sesión.
   `cva-gesture-bridge.service` para desplegar (el reinicio para
   activar/desactivar el capturador ya fue autorizado y usado, eso es distinto), o
   desplegar este código — nada de eso se hizo ni se hará sin ese aviso previo.
+
+## Fase C2 — bajar el tiempo de confirmación de ~15s hacia AC3 (<1.5s) (2026-10-04)
+
+JD aprobó seguir con la Fase C2 del plan (`CVA_deteccion-gestos_plan.md` §3, no vive
+en este repo — ver CLAUDE.md) antes de medir contra AC3 o considerar despliegue:
+reconsiderar `GESTURE_COOLDOWN_SECONDS` y rediseñar la confirmación con datos reales,
+no a ojo. Sigue sobre `fase8-fase-b-mediapipe-pipeline`, mismo worktree. Nada de esto
+tocó el `.venv` de producción ni el servicio real.
+
+### 1. Costo real sostenido sin cooldown — `benchmarks/sustained_load.py`
+
+Corrido contra los 7805 frames reales disponibles (las 2 sesiones de Fase A + la
+sesión de recaptura de meñique), una sola instancia de `GestureDetector` (igual que
+producción), espalda con espalda sin ningún cooldown artificial, ~4.5 min seguidos:
+
+- Latencia por frame: avg=34.5ms, p50=31.9ms, p95=46.0ms, p99=68.7ms, max=111.9ms.
+- CPU: avg=100.7%, max=101.8% de 4 núcleos (1 solo núcleo saturado, sostenido, sin
+  degradarse en los 4.5 min).
+- RSS: 209.2MB → 214.2MB (estable, sin fuga).
+- El cliente real manda frames a ~7fps (~143ms entre frames, CLAUDE.md sección 2) —
+  margen de la Pi sobre ese ritmo: **4.1x en el caso típico (avg), 3.1x en el peor
+  caso medido (p95)**; incluso el frame más lento observado (111.9ms) queda dentro
+  del intervalo real entre frames.
+
+**Decisión, con el número que la respalda:** `GESTURE_COOLDOWN_SECONDS` pasa de `5`
+a **`0.0`** (eliminado, no solo bajado) — la Pi sostiene evaluar cada frame real sin
+saturarse, con margen real medido, no supuesto.
+
+### 2. Ruido real de clasificación por frame — `benchmarks/analyze_raw_stability.py` + `inspect_noise_composition.py`
+
+Corrido el detector real (sin cooldown, sin estabilizador) sobre las 3 sesiones
+completas, detectando automáticamente 40 tramos de gesto genuinamente sostenido
+(≥15 frames con el mismo gesto dominante, detectado por moda en una ventana de
+adelanto, no por la etiqueta del nombre de archivo del sistema viejo).
+
+- 31 de 40 tramos: **cero ruido**, el frame crudo coincidió con el gesto dominante
+  el 100% del tiempo.
+- Tasa de ruido global: avg=1.81%, máximo en un tramo=30.0% (el tramo más ruidoso,
+  de la sesión de recaptura de meñique).
+- Racha de ruido más larga observada en cualquier tramo: **14 frames seguidos**.
+- **Composición del ruido (88 frames de ruido en total, los 40 tramos): 100% fueron
+  `None`** (mano perdida un instante) — **0% fueron otro gesto real en conflicto**.
+  Confirmado explícitamente, no asumido (`inspect_noise_composition.py` desglosa
+  cada tramo con ruido y qué valor tomó cada frame de ruido).
+
+**Por qué esto importa para el diseño:** si el ruido real nunca es "otro gesto
+consistente", la histéresis (quedarse en el último gesto confirmado mientras la
+señal cruda se pierde, sin exigir que el gesto nuevo gane una mayoría para
+*mantenerse* confirmado) no corre el riesgo real de "pegar" un gesto incorrecto —
+solo necesita sobrevivir rachas de `None`.
+
+### 3. `GestureStabilizer` rediseñado — ventana por mayoría CON histéresis
+
+Reemplaza el esquema de Fase 8 (ventana de 3, 2 coincidencias, **sin** histéresis —
+un solo frame de ruido ya tiraba la confirmación a `None`, y con
+`GESTURE_COOLDOWN_SECONDS=5` eso eran ~15s en el peor caso: 3 detecciones procesadas
+× 5s). Dos reglas separadas, en `cva_gesture_bridge/vision/detector.py`:
+
+- **Confirmar/cambiar de gesto**: `min_matches` (default **5**) de las últimas
+  `window_size` (default **7**) observaciones crudas — no exige racha exacta.
+- **Soltar un gesto ya confirmado (histéresis)**: solo tras
+  `release_after_misses` (default **20**) observaciones SEGUIDAS que no sean el
+  gesto confirmado — con margen real (20) sobre la racha de ruido más larga medida
+  (14, punto 2 arriba), no un número arbitrario.
+
+`config.py` expone los tres como `GESTURE_STABILITY_WINDOW`,
+`GESTURE_STABILITY_MIN_MATCHES`, `GESTURE_RELEASE_AFTER_MISSES` (variables de
+entorno `CVA_*` correspondientes). `main.py` actualizado para pasar el tercer
+parámetro a `GestureStabilizer`.
+
+### 4. Tiempo de confirmación real, simulado con datos reales — `benchmarks/simulate_confirmation_time.py`
+
+No es una medición con hardware real todavía (eso es Fase D) — es una simulación
+honesta: la MISMA secuencia cruda de gestos que salió del detector real sobre los
+3727+2132+1946 frames capturados, con sus timestamps REALES de llegada (no un fps
+asumido), pasada por el `GestureStabilizer` nuevo (cooldown≈0, se evalúa cada
+frame), un solo stabilizer por sesión (igual que producción: una instancia por
+conexión).
+
+- **39 de 40 tramos confirmados dentro de AC3 (<1500ms).**
+- Tiempo de confirmación: avg=597ms, p50=573ms, p95=825ms, min=0ms (2 tramos
+  llegaron ya confirmados por histéresis desde un tramo anterior del mismo gesto,
+  sin necesitar reconfirmar nada).
+- **1 tramo superó AC3: 2205ms** (el primer tramo de la sesión de recaptura de
+  meñique). Investigado, no descartado sin más: entre los frames 35 y 36 de esa
+  sesión hay un salto real de **~1.75s** en la llegada de frames — un hueco real de
+  arranque de sesión, no una lentitud del algoritmo. **Hallazgo adicional, honesto,
+  no buscado a propósito:** ese mismo hueco (~1.7-1.8s) aparece en el mismo índice
+  de frame (~35) en las **3** sesiones grabadas independientemente, y después
+  reaparecen huecos más chicos (~500-600ms) cada ~34 frames durante toda cada
+  sesión — un patrón sistemático en la cadencia real de llegada de frames del
+  capturador/cliente viejo, no algo que `GestureStabilizer` pueda arreglar ni que
+  esta fase introdujo. Si AC3 necesita cumplirse sin excepción, esto es candidato a
+  investigarse aparte (posible tema de Fase D) — no se investiga más a fondo aquí
+  porque excede el alcance de "rediseñar la confirmación".
+
+### 5. Verificación de falsos positivos contra el esquema nuevo (no solo el detector crudo)
+
+Pedido explícito de JD: correr la batería de fixtures contra el **esquema de
+confirmación nuevo**, porque la histéresis es justo el mecanismo que podría hacer
+que un falso positivo aislado se "pegara" más tiempo si estuviera mal diseñado.
+Nuevos tests en `tests/test_detector.py` (detector real + `GestureStabilizer` real
+juntos, mismo fixture alimentado 30 veces seguidas simulando una vista sostenida):
+
+- Cara real sin mano (`persona_cara_sin_mano.jpg`, 30 observaciones): **nunca
+  confirma ningún gesto.**
+- Torso real sin mano (`persona_torso_sin_mano_1.jpg`, 30 observaciones): **nunca
+  confirma ningún gesto.**
+- Frame negro sintético (30 observaciones): **nunca confirma ningún gesto.**
+- Control positivo (`fixture_puno_cerrado.jpg`, 10 observaciones): confirma
+  `puño_cerrado` correctamente — confirma que el esquema nuevo sí reconoce el caso
+  válido, no solo que rechaza los falsos positivos.
+
+**Meta de JD cumplida: cero falsos positivos de los 3 tipos históricos contra el
+esquema de confirmación nuevo**, con el mismo criterio de honestidad que el resto
+del proyecto (ver también la salvedad ya documentada en Fase B sobre por qué esta
+protección depende del patrón geométrico, no es una garantía absoluta para
+cualquier imagen posible).
+
+### Resultado de tests
+
+`tests/test_detector.py`: stabilizer reescrito completo (8 tests nuevos de
+histéresis, reemplazan los 6 de Fase 8) + 4 tests nuevos de integración
+detector+stabilizer contra fixtures reales. `tests/test_main.py`: las 13 llamadas a
+`_make_on_jpeg_frame` actualizadas con el parámetro nuevo
+(`stability_release_after_misses`), comportamiento verificado sin cambios para los
+casos que ya cubrían. **Suite completa: 69 passed, 0 failed**
+(`.venv-fase-b/bin/pytest -q`).
+
+### Scripts de esta fase (no se importan desde `cva_gesture_bridge`, no son parte del paquete)
+
+`benchmarks/sustained_load.py`, `analyze_raw_stability.py`,
+`cache_raw_sequences.py` (caché intermedio, gitignorado, regenerable),
+`inspect_noise_composition.py`, `simulate_confirmation_time.py` — todos corren con
+`.venv-fase-b/bin/python`, documentados con su propio docstring explicando qué
+miden y por qué.
+
+### Pendiente antes de cerrar Fase C2 / para Fase D
+
+- Push de la rama — bloqueado por credenciales, igual que siempre.
+- Autorización explícita de JD antes de tocar el `.venv` de producción o el
+  servicio real — nada de eso se hizo aquí.
+- El hallazgo del punto 4 (huecos sistemáticos de llegada de frames, ~1.7-1.8s cerca
+  del frame 35 de cada sesión, ~500-600ms cada ~34 frames después) no se investigó
+  a fondo — queda anotado para cuando llegue la medición end-to-end real de Fase D
+  contra AC3 con hardware real, donde si vuelve a aparecer sí bloquearía el
+  criterio de aceptación.
+- La simulación del punto 4 usa frames ya capturados por el sistema VIEJO (Fase 8)
+  con su propia cadencia real de llegada — no es lo mismo que medir end-to-end con
+  el bridge de Fase B corriendo de verdad contra un cliente real. Es la mejor
+  aproximación disponible sin tocar producción; la medición definitiva es Fase D.

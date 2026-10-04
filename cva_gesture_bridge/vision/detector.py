@@ -84,24 +84,59 @@ class GestureResult:
 
 
 class GestureStabilizer:
-    """Confirma un gesto si aparece al menos `min_matches` veces dentro de las
-    últimas `window_size` detecciones crudas — filtra ruido de un frame aislado sin
-    exigir que sea el mismo gesto en TODAS las muestras seguidas. Sin cambios desde
-    Fase 8 (ver BITACORA.md) — es independiente de qué backend de visión se use."""
+    """Fase C2 (ver BITACORA.md) — ventana deslizante por mayoría CON histéresis,
+    reemplaza el esquema de Fase 8 (ventana de 3, 2 coincidencias, sin histéresis:
+    un solo frame sin gesto ya tiraba la confirmación a None). Dos reglas separadas,
+    calibradas con datos reales de las 3 sesiones de captura (BITACORA.md "Fase C2",
+    `benchmarks/analyze_raw_stability.py`/`inspect_noise_composition.py`):
 
-    def __init__(self, window_size: int = 3, min_matches: int = 2) -> None:
+    - **Confirmar/cambiar de gesto**: un gesto nuevo (o el primero) se confirma si
+      aparece al menos `min_matches` veces dentro de las últimas `window_size`
+      observaciones crudas (default 5 de 7 — a ~143ms/frame real del cliente, eso
+      son ~715ms en el peor caso, dentro de AC3 <1.5s con margen).
+    - **Soltar un gesto ya confirmado (histéresis)**: NO se suelta por un solo frame
+      de ruido ni por una racha corta — se mantiene el último gesto confirmado
+      mientras no se acumulen `release_after_misses` observaciones SEGUIDAS que no
+      sean ese gesto. El 100% del ruido real medido en los 40 tramos de gesto
+      sostenido de Fase A/recaptura de meñique fue `None` (mano perdida un
+      instante), nunca otro gesto real en conflicto — la racha de ruido más larga
+      observada fue 14 frames seguidos; `release_after_misses=20` por defecto deja
+      margen real sobre ese peor caso medido, no un número arbitrario.
+    """
+
+    def __init__(self, window_size: int = 7, min_matches: int = 5, release_after_misses: int = 20) -> None:
         from collections import deque
 
         self._window_size = window_size
         self._min_matches = min_matches
+        self._release_after_misses = release_after_misses
         self._history: deque = deque(maxlen=window_size)
+        self._confirmed: Optional[str] = None
+        self._misses_since_match = 0
 
     def observe(self, gesture: Optional[str]) -> Optional[str]:
         self._history.append(gesture)
-        if gesture is None:
-            return None
-        matches = sum(1 for g in self._history if g == gesture)
-        return gesture if matches >= self._min_matches else None
+
+        if gesture is not None and gesture == self._confirmed:
+            self._misses_since_match = 0
+            return self._confirmed
+
+        if gesture is not None:
+            matches = sum(1 for g in self._history if g == gesture)
+            if matches >= self._min_matches:
+                self._confirmed = gesture
+                self._misses_since_match = 0
+                return self._confirmed
+
+        # Ni coincide con lo ya confirmado ni alcanza mayoría propia todavía --
+        # cuenta como un "miss" del gesto confirmado (incluye gesture=None).
+        if self._confirmed is not None:
+            self._misses_since_match += 1
+            if self._misses_since_match >= self._release_after_misses:
+                self._confirmed = None
+                self._misses_since_match = 0
+
+        return self._confirmed
 
 
 class OneEuroFilter:

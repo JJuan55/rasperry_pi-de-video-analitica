@@ -241,47 +241,95 @@ def test_landmark_smoother_reset_makes_next_call_pass_through_again():
     assert smoother.smooth(raw, t=1.0) == raw
 
 
-# --- GestureStabilizer (sin cambios desde Fase 8 -- ventana deslizante) ----------
+# --- GestureStabilizer (Fase C2 -- ventana por mayoría CON histéresis, ver
+# docstring de la clase en detector.py y BITACORA.md "Fase C2" para la calibración
+# con datos reales que respalda estos defaults: window_size=7, min_matches=5,
+# release_after_misses=20) -----------------------------------------------------
 
 
-def test_stabilizer_does_not_confirm_with_a_single_observation():
-    stabilizer = GestureStabilizer(window_size=3, min_matches=2)
-    assert stabilizer.observe(GESTURE_PUÑO_CERRADO) is None
+def test_stabilizer_does_not_confirm_with_insufficient_matches():
+    stabilizer = GestureStabilizer(window_size=7, min_matches=5)
+    result = None
+    for _ in range(4):
+        result = stabilizer.observe(GESTURE_PUÑO_CERRADO)
+    assert result is None
 
 
-def test_stabilizer_confirms_when_min_matches_reached_even_without_exact_streak():
-    stabilizer = GestureStabilizer(window_size=3, min_matches=2)
-    stabilizer.observe(GESTURE_PUÑO_CERRADO)
-    stabilizer.observe(GESTURE_DEDO_PULGAR)
-    assert stabilizer.observe(GESTURE_PUÑO_CERRADO) == GESTURE_PUÑO_CERRADO
+def test_stabilizer_confirms_once_min_matches_reached_within_window():
+    stabilizer = GestureStabilizer(window_size=7, min_matches=5)
+    result = None
+    for _ in range(5):
+        result = stabilizer.observe(GESTURE_PUÑO_CERRADO)
+    assert result == GESTURE_PUÑO_CERRADO
 
 
-def test_stabilizer_confirms_on_two_consecutive_matches():
-    stabilizer = GestureStabilizer(window_size=3, min_matches=2)
-    stabilizer.observe(GESTURE_PUÑO_CERRADO)
-    assert stabilizer.observe(GESTURE_PUÑO_CERRADO) == GESTURE_PUÑO_CERRADO
+def test_stabilizer_confirms_even_with_noise_interleaved_in_the_window():
+    # 5 de 7 no exige que sean consecutivas -- ruido intercalado no rompe la
+    # confirmación, siempre que la mayoría se alcance dentro de la ventana.
+    stabilizer = GestureStabilizer(window_size=7, min_matches=5)
+    sequence = [
+        GESTURE_PUÑO_CERRADO, None, GESTURE_PUÑO_CERRADO,
+        GESTURE_PUÑO_CERRADO, None, GESTURE_PUÑO_CERRADO, GESTURE_PUÑO_CERRADO,
+    ]
+    result = None
+    for g in sequence:
+        result = stabilizer.observe(g)
+    assert result == GESTURE_PUÑO_CERRADO
 
 
-def test_stabilizer_does_not_confirm_a_gesture_seen_only_once_in_the_window():
-    stabilizer = GestureStabilizer(window_size=3, min_matches=2)
-    stabilizer.observe(GESTURE_PUÑO_CERRADO)
-    stabilizer.observe(GESTURE_DEDO_PULGAR)
-    assert stabilizer.observe(GESTURE_PALMA_ABIERTA) is None
+def test_stabilizer_hysteresis_survives_a_noise_burst_shorter_than_release_threshold():
+    # 14 frames de ruido seguidos es la racha más larga medida contra datos reales
+    # en Fase C2 (BITACORA.md) -- con release_after_misses=20 de margen, no se suelta.
+    stabilizer = GestureStabilizer(window_size=7, min_matches=5, release_after_misses=20)
+    for _ in range(5):
+        stabilizer.observe(GESTURE_PUÑO_CERRADO)
+    result = None
+    for _ in range(14):
+        result = stabilizer.observe(None)
+    assert result == GESTURE_PUÑO_CERRADO
 
 
-def test_stabilizer_none_observation_does_not_confirm_but_stays_in_the_window():
-    stabilizer = GestureStabilizer(window_size=3, min_matches=2)
-    stabilizer.observe(GESTURE_PUÑO_CERRADO)
-    assert stabilizer.observe(None) is None
-    assert stabilizer.observe(GESTURE_PUÑO_CERRADO) == GESTURE_PUÑO_CERRADO
+def test_stabilizer_releases_after_sustained_misses():
+    stabilizer = GestureStabilizer(window_size=7, min_matches=5, release_after_misses=20)
+    for _ in range(5):
+        stabilizer.observe(GESTURE_PUÑO_CERRADO)
+    result = None
+    for _ in range(20):
+        result = stabilizer.observe(None)
+    assert result is None
 
 
-def test_stabilizer_window_slides_and_forgets_old_observations():
-    stabilizer = GestureStabilizer(window_size=3, min_matches=2)
-    stabilizer.observe(GESTURE_PUÑO_CERRADO)
-    stabilizer.observe(GESTURE_PALMA_ABIERTA)
-    stabilizer.observe(GESTURE_PALMA_ABIERTA)
-    assert stabilizer.observe(GESTURE_PUÑO_CERRADO) is None
+def test_stabilizer_switches_to_a_new_gesture_once_it_reaches_its_own_majority():
+    stabilizer = GestureStabilizer(window_size=7, min_matches=5)
+    for _ in range(5):
+        stabilizer.observe(GESTURE_PUÑO_CERRADO)
+    result = None
+    for _ in range(5):
+        result = stabilizer.observe(GESTURE_PALMA_ABIERTA)
+    assert result == GESTURE_PALMA_ABIERTA
+
+
+def test_stabilizer_does_not_switch_on_a_single_frame_of_a_different_gesture():
+    stabilizer = GestureStabilizer(window_size=7, min_matches=5)
+    for _ in range(5):
+        stabilizer.observe(GESTURE_PUÑO_CERRADO)
+    result = stabilizer.observe(GESTURE_PALMA_ABIERTA)
+    assert result == GESTURE_PUÑO_CERRADO
+
+
+def test_stabilizer_default_parameters_match_the_calibrated_values():
+    # Si esto falla, alguien cambió los defaults de la clase sin actualizar
+    # config.py (o viceversa) -- deben moverse juntos, ver BITACORA.md "Fase C2".
+    stabilizer = GestureStabilizer()
+    result = None
+    for _ in range(5):
+        result = stabilizer.observe(GESTURE_PUÑO_CERRADO)
+    assert result == GESTURE_PUÑO_CERRADO  # confirma con el default de min_matches=5
+    for _ in range(19):
+        result = stabilizer.observe(None)
+    assert result == GESTURE_PUÑO_CERRADO  # todavía no llega a release_after_misses=20
+    result = stabilizer.observe(None)
+    assert result is None  # el miss número 20 sí suelta
 
 
 # --- Fixtures reales (Fase A -> Fase B) -------------------------------------------
@@ -403,3 +451,51 @@ def test_empty_black_frame_detects_nothing(fresh_detector):
     assert result.gesture is None
     assert result.confidence == 0.0
     assert result.extended_fingers == 0
+
+
+# --- Fase C2: detector + GestureStabilizer (histéresis) juntos, contra los mismos
+# fixtures reales -- no alcanza con probar el detector crudo solo (ya se hizo
+# arriba), la histéresis es justamente lo que podría hacer que un falso positivo
+# aislado se "pegara" más tiempo si no estuviera bien diseñada. Simula una vista
+# sostenida (no un solo frame) alimentando el mismo fixture repetidas veces al
+# detector real + un GestureStabilizer con los defaults calibrados en BITACORA.md
+# "Fase C2". Meta de JD: cero falsos positivos de los 3 tipos históricos contra el
+# esquema de confirmación nuevo, no solo contra el detector crudo. ---------------
+
+
+@requires_real_fixtures
+def test_sustained_face_view_never_confirms_a_gesture(fresh_detector):
+    stabilizer = GestureStabilizer()
+    jpeg = _read_fixture("persona_cara_sin_mano.jpg")
+    results = [stabilizer.observe(fresh_detector.detect(jpeg).gesture) for _ in range(30)]
+    assert all(r is None for r in results)
+
+
+@requires_real_fixtures
+def test_sustained_torso_view_never_confirms_a_gesture(fresh_detector):
+    stabilizer = GestureStabilizer()
+    jpeg = _read_fixture("persona_torso_sin_mano_1.jpg")
+    results = [stabilizer.observe(fresh_detector.detect(jpeg).gesture) for _ in range(30)]
+    assert all(r is None for r in results)
+
+
+@requires_real_fixtures
+def test_sustained_empty_frame_never_confirms_a_gesture(fresh_detector):
+    stabilizer = GestureStabilizer()
+    blank = np.zeros((240, 320, 3), dtype=np.uint8)
+    ok, buf = cv2.imencode(".jpg", blank)
+    assert ok
+    jpeg = buf.tobytes()
+    results = [stabilizer.observe(fresh_detector.detect(jpeg).gesture) for _ in range(30)]
+    assert all(r is None for r in results)
+
+
+@requires_real_fixtures
+def test_sustained_real_gesture_confirms_through_the_full_pipeline(fresh_detector):
+    # Control positivo: el mismo esquema que arriba, pero con un gesto real del
+    # catálogo -- confirma que detector+stabilizer juntos SÍ reconocen el caso
+    # válido, no solo que rechazan los falsos positivos.
+    stabilizer = GestureStabilizer()
+    jpeg = _read_fixture("fixture_puno_cerrado.jpg")
+    results = [stabilizer.observe(fresh_detector.detect(jpeg).gesture) for _ in range(10)]
+    assert results[-1] == GESTURE_PUÑO_CERRADO

@@ -28,6 +28,11 @@ captured_frames/
 # está presente, así el resto del suite sigue corriendo en un clon limpio) ──
 tests/fixtures_real/
 
+# ── Fase C2: caché de secuencias crudas derivadas de los frames reales (regenerable
+# con benchmarks/cache_raw_sequences.py, 552KB, no aporta nada versionado que no
+# pueda recalcularse de los fixtures/sesiones reales, que ya están gitignoreados) ──
+benchmarks/raw_sequences_cache.json
+
 # ── OS ──
 .DS_Store
 Thumbs.db
