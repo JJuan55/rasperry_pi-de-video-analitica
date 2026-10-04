@@ -1,16 +1,13 @@
-# Dependencias de runtime del bridge (Fase 8 en adelante — visión real).
+# Dependencias de runtime del bridge — Fase B (MediaPipe HandLandmarker, ver
+# BITACORA.md). Reemplaza el requirements.txt de Fase 8 (YOLO+OpenCV): torch,
+# torchvision y ultralytics ya no los usa nada en el repo (MediaPipe localiza la mano
+# directamente, no hace falta YOLO para acotar la región) -- confirmado antes de
+# quitarlos, no solo asumido (ver BITACORA.md, sección de housekeeping de Fase B).
 #
-# torch/torchvision deben instalarse primero desde el índice CPU-only de PyTorch,
-# para no arrastrar ~5GB de paquetes CUDA inútiles en esta Pi 5 (sin GPU NVIDIA):
-#
-#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
-#   pip install -r requirements.txt
-#
-# (el --extra-index-url de abajo alcanza si se instala todo en un solo paso, pero el
-# comando de dos pasos de arriba es el que se usó y verificó en esta sesión)
---extra-index-url https://download.pytorch.org/whl/cpu
-
-torch==2.14.0+cpu
-torchvision==0.29.0+cpu
-ultralytics==8.4.153
-opencv-python==5.0.0.93
+# mediapipe trae opencv-contrib-python como dependencia -- verificado que sirve como
+# reemplazo drop-in de opencv-python para este proyecto (los 54 tests existentes
+# pasan igual, y los símbolos de cv2 que usa detector.py/main.py están todos
+# presentes), así que no hace falta instalar opencv-python por separado ni resolver
+# ningún conflicto entre los dos paquetes.
+mediapipe==1.0.1
+opencv-contrib-python==5.0.0.93

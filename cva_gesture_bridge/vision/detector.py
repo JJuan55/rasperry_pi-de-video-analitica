@@ -1,44 +1,41 @@
-"""Reconocimiento de gestos — Fase 8: YOLO para localizar la región de la mano/persona,
-OpenCV clásico (contorno + convex hull + convexity defects) para clasificar el gesto.
+"""Reconocimiento de gestos — Fase B: MediaPipe HandLandmarker reemplaza por completo
+el diseño de Fase 8 (YOLO para localizar "persona" + OpenCV para segmentar piel/contar
+dedos + MotionGate + recorte de franja superior). Ver BITACORA.md "Fase B".
 
-Decisión de arquitectura (JD, ver BITACORA.md "Fase 8"): no existe ningún modelo/dataset
-ya entrenado para los 4 gestos de esta fase. En vez de entrenar uno nuevo o bajar pesos
-de terceros no verificados, YOLO (pesos oficiales de Ultralytics, sin fine-tuning) solo
-localiza la región de la persona en el frame para acotar la búsqueda; la clasificación
-real del gesto es 100% OpenCV (segmentación por color de piel + conteo de dedos vía
-convexity defects). Es un prototipo heurístico, no un clasificador entrenado — su
-precisión real contra AC3 (≥70% aciertos) depende de la validación manual con cámara
-real documentada en BITACORA.md, no de este código en aislamiento.
+Por qué se retiró el diseño anterior — no lo reintroduzcas "por las dudas" sin releer
+esto primero, el conflicto está documentado con datos reales, no es una corazonada:
 
-Catálogo de esta fase (subconjunto de GESTOS.md, decisión de JD — ajustado el
-2026-09-17 tras la primera prueba manual, ver BITACORA.md): puño_cerrado,
-palma_abierta, dedo_pulgar, dedo_menique. `dedo_indice`, `dedo_anular`, `dedo_medio` y
-el mapeo completo quedan para fases futuras.
+- La segmentación por color de piel (HSV) confundía cara, cuello y torso con una mano
+  real — geométricamente casi indistinguibles a la resolución real del cliente
+  (320x240). Ver BITACORA.md "Fase 8", los dos fixes de falsos positivos.
+- El recorte de franja superior (para sacar la cara) y `MotionGate` (para sacar
+  torso/cara estáticos) fueron parches sobre ese problema de raíz, no una solución de
+  fondo — y `MotionGate` en particular introdujo un conflicto estructural nuevo: el
+  fondo se actualiza con cada frame procesado, incluso mientras hay una mano real en
+  cuadro, así que una mano que cambia de gesto sin salir de cuadro se va fundiendo con
+  su propio fondo reciente y el conteo de dedos se rompe. Confirmado con datos reales
+  (ver BITACORA.md "Fase 8", "Segundo fix de falsos positivos").
+- YOLO solo localizaba una caja "persona" gruesa (no existe clase "mano" en los pesos
+  oficiales sin fine-tuning) — pagaba ~440ms de costo real sin aportar nada a la
+  clasificación en sí, que era 100% heurística de OpenCV sobre esa caja.
 
-Fix de falsos positivos sin mano presente (2026-09-18, ver BITACORA.md): sin mano en
-el frame, `segment_hand()` podía tomar la cara/cuello (también piel) como el contorno
-más grande dentro de la región "persona" de YOLO. Tres defensas, de la más a la menos
-preventiva: (1) la ROI de segmentación excluye la franja superior de la caja
-"persona" (`_FACE_EXCLUSION_TOP_FRACTION`, ahí suele estar la cara); (2)
-`_is_plausible_hand_contour()` rechaza el contorno segmentado si su aspect ratio o
-solidity caen fuera de un rango plausible para una mano; (3) `GestureStabilizer`
-(usado en `main.py`) exige que el gesto se repita dentro de una ventana de frames
-antes de emitirlo, para que ruido puntual de un solo frame no dispare nada.
+MediaPipe HandLandmarker detecta la mano directamente (no hace falta acotar la región
+con otro modelo antes) y da 21 landmarks 3D reales por mano, con su propio score de
+confianza — reemplaza tanto la localización (antes YOLO) como la clasificación
+geométrica (antes OpenCV) de una sola vez. Verificado con datos reales de las dos
+sesiones de captura de Fase A (rama `spike/fase8-mediapipe-viabilidad`): confianza
+consistentemente >0.92 en 46 gestos sostenidos reales, contra 0 reconocimientos de
+`palma_abierta` del sistema viejo sobre la misma persona en la misma sesión.
 
-Segundo fix de falsos positivos (mismo día, ver BITACORA.md): con la persona cerca de
-la cámara, la caja "persona" de YOLO puede cubrir casi todo el frame — la franja
-excluida (1) ya no alcanza para sacar el torso/pecho, que es piel real, geométricamente
-casi indistinguible de un puño real (área/aspect/solidity se solapan). `MotionGate`
-mantiene un modelo de fondo del frame completo y solo deja pasar a segmentación la piel
-que cambió recientemente respecto a ese fondo — piel que siempre está en cuadro
-(torso, cuello) queda absorbida como fondo y no se considera candidata a mano.
+Catálogo de gestos: igual que Fase 8 (subconjunto de GESTOS.md, decisión de JD) —
+puño_cerrado, palma_abierta, dedo_pulgar, dedo_menique.
 """
 
 import logging
 import math
-from collections import deque
+import time
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -50,106 +47,33 @@ GESTURE_PALMA_ABIERTA = "palma_abierta"
 GESTURE_DEDO_PULGAR = "dedo_pulgar"
 GESTURE_DEDO_MENIQUE = "dedo_menique"
 
-# COCO class 0 = "person" — no existe clase de "mano" en los pesos oficiales sin
-# fine-tuning (ver nota de arquitectura arriba).
-YOLO_PERSON_CLASS_ID = 0
+# Índices de los 21 landmarks de MediaPipe Hands (topología pública y fija).
+WRIST = 0
+THUMB_MCP, THUMB_TIP = 2, 4
+FINGER_MCP_TIP = {
+    "indice": (5, 8),
+    "medio": (9, 12),
+    "anular": (13, 16),
+    "menique": (17, 20),
+}
 
-# Rango HSV de piel usado para segmentar la mano dentro de la región de interés.
-# Heurística clásica de OpenCV — su precisión varía con el tono de piel y la
-# iluminación; ver limitación documentada en el reporte de cierre de Fase 8.
-_SKIN_HSV_LOW = np.array([0, 30, 60], dtype=np.uint8)
-_SKIN_HSV_HIGH = np.array([20, 150, 255], dtype=np.uint8)
-
-_MIN_CONTOUR_AREA = 1500  # px² — descarta ruido pequeño en la máscara de piel
-# Subido de 0.15 a 0.20 el 2026-09-18 (ver BITACORA.md "Fase 8", diagnóstico con datos
-# reales): a la resolución real del cliente (320x240, más baja que los 640x480 usados
-# en el benchmark), el mismo puño sostenido cruzaba este umbral de un frame a otro por
-# jitter normal de la máscara de piel, alternando entre "0 dedos" y "2-3 dedos" sin que
-# la mano se moviera. Calibrado con margen contra los fixtures sintéticos de
-# tests/test_detector.py (el defect más débil de la palma abierta da ~0.23-0.27, por
-# encima de este umbral).
-_MIN_DEFECT_DEPTH_RATIO = 0.20  # proporción de la diagonal del bounding box
-_SINGLE_FINGER_ASPECT_THRESHOLD = 1.4  # alto/ancho mínimo para distinguir 1 dedo de puño
-_SINGLE_FINGER_ASPECT_CONFIDENT = 2.2  # alto/ancho a partir del cual la confianza satura
-
-# Filtro de plausibilidad (fix de falsos positivos sin mano, ver nota de módulo y
-# BITACORA.md "Fase 8"). Calibrado contra los contornos sintéticos de
-# tests/test_detector.py, no contra fotos reales — los 4 gestos del catálogo caen en
-# solidity ~0.69-0.88, mientras que un óvalo liso tipo cara cae en ~0.99. El techo de
-# solidity es la defensa más importante de las dos: una cara puede tener casi
-# cualquier aspect ratio según el encuadre, pero difícilmente baja de esa solidity tan
-# alta (sin la textura/concavidad que sí tiene una mano real, incluso en puño).
-_MIN_PLAUSIBLE_ASPECT = 0.4
-_MAX_PLAUSIBLE_ASPECT = 4.0
-_MIN_PLAUSIBLE_SOLIDITY = 0.35
-_MAX_PLAUSIBLE_SOLIDITY = 0.95
-
-# Franja superior de la caja "persona" de YOLO que se excluye antes de segmentar piel
-# — ahí suele estar la cara cuando el encuadre incluye más que solo la mano.
-# Bajado de 0.35 a 0.15 el 2026-09-18: la prueba real con el servicio desplegado (JD
-# sosteniendo un puño cerrado 30s) dio 0 detecciones — el 35% original, en un encuadre
-# típico de webcam (cabeza y hombros), muy probablemente recortaba también la mano si
-# se sostiene cerca de la cara/hombro para mostrarla a la cámara, no solo la cara. El
-# filtro de plausibilidad y el GestureStabilizer (ver arriba) siguen siendo las
-# defensas principales contra la cara — este recorte ahora es solo una ayuda ligera,
-# no la defensa principal. Sigue sin estar calibrado contra fotos reales de esta Pi;
-# si 0.15 resulta insuficiente contra falsos positivos, o todavía corta manos reales,
-# hay que volver a medir, no adivinar otro número.
-_FACE_EXCLUSION_TOP_FRACTION = 0.15
-
-# MotionGate (segundo fix de falsos positivos, 2026-09-18 — ver BITACORA.md "Fase 8"):
-# alpha bajo a propósito, para que un gesto sostenido varios segundos no se "absorba"
-# como fondo antes de que el GestureStabilizer alcance a confirmarlo (ventana de
-# confirmación ~10-15s con la configuración por defecto). Riesgo conocido y documentado
-# en BITACORA.md: una sesión sosteniendo el mismo gesto varios *minutos* sin pausa
-# todavía podría acabar absorbida — no cubierto en esta primera versión.
-_MOTION_BACKGROUND_ALPHA = 0.08
-_MOTION_DIFF_THRESHOLD = 25  # diferencia de intensidad (0-255) para contar como "cambió"
-_MOTION_MASK_DILATE_KERNEL_SIZE = 9
-
-
-class MotionGate:
-    """Modelo de fondo (promedio móvil exponencial) del frame completo — devuelve una
-    máscara de qué píxeles cambiaron recientemente respecto a ese fondo, para no
-    confundir piel que siempre está en cuadro (torso, cuello) con una mano que acaba
-    de aparecer. Ver nota de módulo, "Segundo fix de falsos positivos"."""
-
-    def __init__(
-        self,
-        alpha: float = _MOTION_BACKGROUND_ALPHA,
-        diff_threshold: int = _MOTION_DIFF_THRESHOLD,
-        dilate_kernel_size: int = _MOTION_MASK_DILATE_KERNEL_SIZE,
-    ) -> None:
-        self._alpha = alpha
-        self._diff_threshold = diff_threshold
-        self._dilate_kernel = cv2.getStructuringElement(
-            cv2.MORPH_ELLIPSE, (dilate_kernel_size, dilate_kernel_size)
-        )
-        self._background: Optional[np.ndarray] = None
-
-    def reset(self) -> None:
-        """Olvida el fondo aprendido — usar tras un frame que no es representativo de
-        la escena real (p.ej. el frame en negro del warmup de arranque)."""
-        self._background = None
-
-    def update_and_get_motion_mask(self, frame_bgr: np.ndarray) -> Optional[np.ndarray]:
-        """Alimenta un frame nuevo; devuelve la máscara de movimiento, o `None` si el
-        fondo todavía no está establecido (primer frame tras `reset()`/arranque, o
-        cambió el tamaño del frame) — en ese caso no hay que confiar en ninguna región
-        como "mano" todavía."""
-        frame_f = frame_bgr.astype(np.float32)
-
-        if self._background is None or self._background.shape != frame_f.shape:
-            self._background = frame_f
-            return None
-
-        prev_background = self._background.astype(np.uint8)
-        diff_gray = cv2.cvtColor(cv2.absdiff(frame_bgr, prev_background), cv2.COLOR_BGR2GRAY)
-        _, motion_mask = cv2.threshold(diff_gray, self._diff_threshold, 255, cv2.THRESH_BINARY)
-        motion_mask = cv2.dilate(motion_mask, self._dilate_kernel)
-
-        self._background = self._alpha * frame_f + (1 - self._alpha) * self._background
-        return motion_mask
+# Umbrales de "dedo extendido" sobre coordenadas de MUNDO (hand_world_landmarks, 3D en
+# metros, normalizadas por el tamaño real de la mano — no píxeles de imagen, así no
+# dependen de qué tan cerca esté la mano de la cámara).
+#
+# RECALIBRADOS con datos reales de Fase B (no se dieron por buenos los valores
+# heredados del spike, que estaban tuneados sobre landmarks normalizados de imagen en
+# 2D, no sobre mundo 3D) — ver BITACORA.md "Fase B", investigación de fixtures reales:
+# con el umbral original del pulgar (1.3, medido contra el nudillo base del índice)
+# un pulgar-arriba
+# real medía ratio=1.253 y quedaba clasificado como puño_cerrado (falso negativo real,
+# confirmado con imagen real inspeccionada visualmente, no solo con la etiqueta del
+# nombre de archivo — esas etiquetas vienen del sistema viejo YOLO+OpenCV y resultaron
+# no confiables como ground truth). Medir el pulgar contra la MUÑECA, igual que los
+# otros 4 dedos, separa mucho mejor los dos casos reales: puño real=1.424,
+# pulgar-arriba real=2.184 — margen amplio, umbral 1.7 a mitad de camino.
+_THUMB_EXTENDED_RATIO = 1.7
+_FINGER_EXTENDED_RATIO = 1.15
 
 
 @dataclass
@@ -159,264 +83,234 @@ class GestureResult:
     extended_fingers: int
 
 
-def _distance(a: Tuple[int, int], b: Tuple[int, int]) -> float:
-    return math.hypot(a[0] - b[0], a[1] - b[1])
-
-
-def count_finger_gaps(contour: np.ndarray) -> int:
-    """Cuenta los "huecos" entre dedos extendidos vía convexity defects.
-
-    Cada hueco cualificado (ángulo <= 90° en el punto más profundo, profundidad
-    relevante respecto al tamaño de la mano) corresponde a un espacio entre dos dedos
-    extendidos consecutivos.
-    """
-    if contour is None or len(contour) < 5:
-        return 0
-
-    try:
-        hull_indices = cv2.convexHull(contour, returnPoints=False)
-    except cv2.error as exc:
-        logger.warning("convexHull falló sobre un contorno degenerado: %s", exc)
-        return 0
-
-    if hull_indices is None or len(hull_indices) < 3:
-        return 0
-
-    try:
-        defects = cv2.convexityDefects(contour, hull_indices)
-    except cv2.error as exc:
-        logger.warning("convexityDefects falló sobre un contorno degenerado: %s", exc)
-        return 0
-
-    if defects is None:
-        return 0
-
-    x, y, w, h = cv2.boundingRect(contour)
-    scale = math.hypot(w, h)
-    if scale == 0:
-        return 0
-
-    # cv2.convexityDefects devuelve shape (N, 1, 4) en versiones clásicas de OpenCV y
-    # (N, 4) en OpenCV 5 — se normaliza para no depender de cuál sea.
-    defects = defects.reshape(-1, 4)
-
-    gaps = 0
-    for i in range(defects.shape[0]):
-        s, e, f, d = defects[i]
-        depth = d / 256.0
-        if depth / scale < _MIN_DEFECT_DEPTH_RATIO:
-            continue
-
-        start = tuple(contour[s][0])
-        end = tuple(contour[e][0])
-        far = tuple(contour[f][0])
-        a_side = _distance(end, start)
-        b_side = _distance(far, start)
-        c_side = _distance(far, end)
-        if b_side == 0 or c_side == 0:
-            continue
-
-        cos_angle = (b_side**2 + c_side**2 - a_side**2) / (2 * b_side * c_side)
-        angle = math.acos(max(-1.0, min(1.0, cos_angle)))
-        if angle <= math.pi / 2:
-            gaps += 1
-
-    return gaps
-
-
-def count_extended_fingers(contour: np.ndarray) -> int:
-    """Estima cuántos dedos están extendidos.
-
-    Con 0 huecos cualificados no se puede distinguir puño cerrado (0 dedos) de un solo
-    dedo extendido (1 dedo, sin hueco porque no hay un dedo vecino) solo con defects —
-    se usa como segunda señal el aspect ratio del bounding box (una mano con un dedo
-    extendido es notablemente más alta que ancha; un puño es compacto).
-    """
-    gaps = count_finger_gaps(contour)
-    if gaps >= 1:
-        return min(gaps + 1, 5)
-
-    x, y, w, h = cv2.boundingRect(contour)
-    aspect = (h / w) if w > 0 else 0.0
-    return 1 if aspect >= _SINGLE_FINGER_ASPECT_THRESHOLD else 0
-
-
-def classify_gesture(contour: np.ndarray, extended_fingers: int) -> Tuple[Optional[str], float]:
-    """Clasifica el gesto entre los 4 del catálogo de esta fase (puño_cerrado,
-    palma_abierta, dedo_pulgar, dedo_menique), con una confianza heurística (no es una
-    probabilidad aprendida — ver nota de módulo)."""
-    area = cv2.contourArea(contour)
-    hull = cv2.convexHull(contour)
-    hull_area = cv2.contourArea(hull)
-    solidity = (area / hull_area) if hull_area > 0 else 0.0
-
-    if extended_fingers == 0:
-        return GESTURE_PUÑO_CERRADO, min(1.0, solidity)
-
-    if extended_fingers >= 4:
-        confidence = min(1.0, (extended_fingers / 5.0) * max(solidity, 0.5))
-        return GESTURE_PALMA_ABIERTA, confidence
-
-    if extended_fingers == 1:
-        x, y, w, h = cv2.boundingRect(contour)
-        aspect = (h / w) if w > 0 else 0.0
-        confidence = min(1.0, aspect / _SINGLE_FINGER_ASPECT_CONFIDENT)
-
-        # Desambiguar pulgar vs. meñique por la posición horizontal de la punta del
-        # dedo respecto al centro del bounding box (son los dos dedos más laterales
-        # de la mano, así que esta heurística de izquierda/derecha encaja mejor que
-        # con dedos centrales). Asume una orientación de mano consistente (dorso o
-        # palma de frente a la cámara) — es el supuesto más frágil de esta fase, ver
-        # BITACORA.md "Fase 8". El pulgar en particular puede extenderse de forma
-        # lateral en vez de hacia arriba (p.ej. un "thumbs up" girado), lo que puede
-        # no producir el bounding box alto-y-angosto que asume el aspect ratio de
-        # arriba — verificar explícitamente en la validación manual, no asumir.
-        fingertip = min(contour.reshape(-1, 2).tolist(), key=lambda p: p[1])
-        center_x = x + w / 2.0
-        if fingertip[0] < center_x:
-            return GESTURE_DEDO_PULGAR, confidence
-        return GESTURE_DEDO_MENIQUE, confidence
-
-    # 2 o 3 dedos extendidos: fuera del catálogo de 4 gestos de esta fase.
-    return None, 0.0
-
-
-def _is_plausible_hand_contour(contour: np.ndarray) -> bool:
-    """Rechaza contornos que geométricamente no podrían ser ninguno de los 4 gestos
-    del catálogo — en particular, una cara/cuello segmentados por error en vez de una
-    mano (ver nota de módulo). No sustituye el conteo de dedos; es un filtro previo:
-    solo dice si vale la pena intentar clasificar el contorno."""
-    x, y, w, h = cv2.boundingRect(contour)
-    if w == 0 or h == 0:
-        return False
-
-    aspect = h / w
-    if not (_MIN_PLAUSIBLE_ASPECT <= aspect <= _MAX_PLAUSIBLE_ASPECT):
-        return False
-
-    hull_area = cv2.contourArea(cv2.convexHull(contour))
-    if hull_area <= 0:
-        return False
-    solidity = cv2.contourArea(contour) / hull_area
-
-    return _MIN_PLAUSIBLE_SOLIDITY <= solidity <= _MAX_PLAUSIBLE_SOLIDITY
-
-
-def classify_contour(contour: np.ndarray) -> GestureResult:
-    """De un contorno ya segmentado a la decisión final de gesto, pasando por el
-    filtro de plausibilidad — punto de entrada testeable sin cámara/YOLO real para
-    todo lo que no sea la segmentación de piel en sí."""
-    extended = count_extended_fingers(contour)
-    if not _is_plausible_hand_contour(contour):
-        return GestureResult(None, 0.0, extended)
-
-    gesture, confidence = classify_gesture(contour, extended)
-    return GestureResult(gesture, confidence, extended)
-
-
 class GestureStabilizer:
-    """Confirma un gesto si aparece al menos `min_matches` veces dentro de las
-    últimas `window_size` detecciones crudas — filtra ruido de un frame aislado sin
-    exigir que sea el mismo gesto en TODAS las muestras seguidas.
+    """Fase C2 (ver BITACORA.md) — ventana deslizante por mayoría CON histéresis,
+    reemplaza el esquema de Fase 8 (ventana de 3, 2 coincidencias, sin histéresis:
+    un solo frame sin gesto ya tiraba la confirmación a None). Dos reglas separadas,
+    calibradas con datos reales de las 3 sesiones de captura (BITACORA.md "Fase C2",
+    `benchmarks/analyze_raw_stability.py`/`inspect_noise_composition.py`):
 
-    Rediseñado el 2026-09-18 (ver BITACORA.md "Fase 8"): la versión anterior exigía
-    una racha exacta ("N iguales seguidas"), pero los datos reales mostraron que la
-    clasificación de una mano real sostenida quieta igual varía de una muestra a la
-    siguiente (ruido normal de la máscara de piel) — una sola muestra distinta bastaba
-    para reiniciar la racha a cero y la confirmación casi nunca se completaba. Una
-    ventana deslizante tolera esa clase de ruido: con `window_size=3,
-    min_matches=2` (default), 2 de las últimas 3 detecciones iguales ya confirman,
-    en vez de exigir que las 3 coincidan exactamente."""
+    - **Confirmar/cambiar de gesto**: un gesto nuevo (o el primero) se confirma si
+      aparece al menos `min_matches` veces dentro de las últimas `window_size`
+      observaciones crudas (default 5 de 7 — a ~143ms/frame real del cliente, eso
+      son ~715ms en el peor caso, dentro de AC3 <1.5s con margen).
+    - **Soltar un gesto ya confirmado (histéresis)**: NO se suelta por un solo frame
+      de ruido ni por una racha corta — se mantiene el último gesto confirmado
+      mientras no se acumulen `release_after_misses` observaciones SEGUIDAS que no
+      sean ese gesto. El 100% del ruido real medido en los 40 tramos de gesto
+      sostenido de Fase A/recaptura de meñique fue `None` (mano perdida un
+      instante), nunca otro gesto real en conflicto — la racha de ruido más larga
+      observada fue 14 frames seguidos; `release_after_misses=20` por defecto deja
+      margen real sobre ese peor caso medido, no un número arbitrario.
+    """
 
-    def __init__(self, window_size: int = 3, min_matches: int = 2) -> None:
+    def __init__(self, window_size: int = 7, min_matches: int = 5, release_after_misses: int = 20) -> None:
+        from collections import deque
+
         self._window_size = window_size
         self._min_matches = min_matches
+        self._release_after_misses = release_after_misses
         self._history: deque = deque(maxlen=window_size)
+        self._confirmed: Optional[str] = None
+        self._misses_since_match = 0
 
     def observe(self, gesture: Optional[str]) -> Optional[str]:
-        """Alimenta una detección cruda; devuelve el gesto confirmado (si aparece al
-        menos `min_matches` veces en la ventana, incluyendo esta detección) o `None`."""
         self._history.append(gesture)
-        if gesture is None:
-            return None
 
-        matches = sum(1 for g in self._history if g == gesture)
-        return gesture if matches >= self._min_matches else None
+        if gesture is not None and gesture == self._confirmed:
+            self._misses_since_match = 0
+            return self._confirmed
+
+        if gesture is not None:
+            matches = sum(1 for g in self._history if g == gesture)
+            if matches >= self._min_matches:
+                self._confirmed = gesture
+                self._misses_since_match = 0
+                return self._confirmed
+
+        # Ni coincide con lo ya confirmado ni alcanza mayoría propia todavía --
+        # cuenta como un "miss" del gesto confirmado (incluye gesture=None).
+        if self._confirmed is not None:
+            self._misses_since_match += 1
+            if self._misses_since_match >= self._release_after_misses:
+                self._confirmed = None
+                self._misses_since_match = 0
+
+        return self._confirmed
 
 
-def segment_hand(frame_bgr: np.ndarray, motion_mask: Optional[np.ndarray] = None) -> Optional[np.ndarray]:
-    """Encuentra el contorno más grande que parece piel dentro del frame (o ROI).
+class OneEuroFilter:
+    """Filtro adaptativo de suavizado de un valor escalar en el tiempo (Casiez et al.
+    2012, "1€ Filter") — corta más ruido cuando el movimiento es lento y menos cuando
+    es rápido, para no introducir lag perceptible en movimientos reales de la mano.
+    Una instancia filtra UNA dimensión escalar; `LandmarkSmoother` de abajo maneja las
+    63 (21 landmarks x,y,z) que hacen falta para una mano completa."""
 
-    `motion_mask` (segundo fix de falsos positivos, ver nota de módulo): si se pasa,
-    solo se considera piel que además cayó dentro de esa máscara — piel estática
-    (torso, cuello) queda descartada aunque sea del color correcto."""
-    hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
-    mask = cv2.inRange(hsv, _SKIN_HSV_LOW, _SKIN_HSV_HIGH)
+    def __init__(self, min_cutoff: float = 1.0, beta: float = 0.0, d_cutoff: float = 1.0) -> None:
+        self._min_cutoff = min_cutoff
+        self._beta = beta
+        self._d_cutoff = d_cutoff
+        self._x_prev: Optional[float] = None
+        self._dx_prev = 0.0
+        self._t_prev: Optional[float] = None
 
-    if motion_mask is not None:
-        mask = cv2.bitwise_and(mask, motion_mask)
+    def reset(self) -> None:
+        self._x_prev = None
+        self._dx_prev = 0.0
+        self._t_prev = None
 
-    # Subido de (5,5) a (7,7) el 2026-09-18 (ver BITACORA.md "Fase 8"): a la
-    # resolución real de 320x240 el kernel chico dejaba pasar más ruido dentado en el
-    # borde de la máscara del esperado, contribuyendo a la inestabilidad del conteo de
-    # dedos entre frames (junto con el ajuste de _MIN_DEFECT_DEPTH_RATIO de arriba).
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+    @staticmethod
+    def _alpha(cutoff: float, dt: float) -> float:
+        tau = 1.0 / (2 * math.pi * cutoff)
+        return 1.0 / (1.0 + tau / dt)
 
-    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    if not contours:
-        return None
+    def __call__(self, x: float, t: float) -> float:
+        if self._t_prev is None:
+            self._x_prev, self._dx_prev, self._t_prev = x, 0.0, t
+            return x
 
-    largest = max(contours, key=cv2.contourArea)
-    if cv2.contourArea(largest) < _MIN_CONTOUR_AREA:
-        return None
-    return largest
+        dt = max(t - self._t_prev, 1e-6)  # nunca dt<=0 -- evita división por cero si
+        # dos frames llegan con el mismo timestamp (resolución de reloj limitada)
+        dx = (x - self._x_prev) / dt
+        a_d = self._alpha(self._d_cutoff, dt)
+        dx_hat = a_d * dx + (1 - a_d) * self._dx_prev
+
+        cutoff = self._min_cutoff + self._beta * abs(dx_hat)
+        a = self._alpha(cutoff, dt)
+        x_hat = a * x + (1 - a) * self._x_prev
+
+        self._x_prev, self._dx_prev, self._t_prev = x_hat, dx_hat, t
+        return x_hat
+
+
+class LandmarkSmoother:
+    """Aplica un `OneEuroFilter` independiente a cada una de las 63 coordenadas (21
+    landmarks x,y,z) de la mano, a través de la secuencia temporal de frames de una
+    misma conexión. `reset()` cuando la mano desaparece de cuadro — si no, el primer
+    landmark real tras un hueco se suavizaría contra una posición vieja y arrastraría
+    un salto falso en vez de aparecer limpio."""
+
+    def __init__(self, min_cutoff: float = 1.0, beta: float = 0.0) -> None:
+        self._min_cutoff = min_cutoff
+        self._beta = beta
+        self._filters: Optional[List[OneEuroFilter]] = None
+
+    def reset(self) -> None:
+        self._filters = None
+
+    def smooth(self, landmarks_xyz: List[Tuple[float, float, float]], t: float) -> List[Tuple[float, float, float]]:
+        if self._filters is None:
+            self._filters = [OneEuroFilter(self._min_cutoff, self._beta) for _ in range(len(landmarks_xyz) * 3)]
+
+        out = []
+        for i, (x, y, z) in enumerate(landmarks_xyz):
+            fx, fy, fz = self._filters[i * 3], self._filters[i * 3 + 1], self._filters[i * 3 + 2]
+            out.append((fx(x, t), fy(y, t), fz(z, t)))
+        return out
+
+
+def _dist3(a: Tuple[float, float, float], b: Tuple[float, float, float]) -> float:
+    return math.sqrt((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2 + (a[2] - b[2]) ** 2)
+
+
+def extended_fingers_pattern(landmarks_xyz: List[Tuple[float, float, float]]) -> Tuple[bool, bool, bool, bool, bool]:
+    """`landmarks_xyz`: 21 tuplas (x,y,z) en metros (hand_world_landmarks, ya
+    suavizadas o crudas — la función no lo asume). Devuelve una tupla de 5 booleanos
+    (pulgar, índice, medio, anular, meñique) — extendido o no. Un dedo se considera
+    extendido si la punta está más lejos de la muñeca que su nudillo base, con margen
+    (`_FINGER_EXTENDED_RATIO`/`_THUMB_EXTENDED_RATIO` — ver comentario de esas
+    constantes sobre por qué el pulgar también se mide contra la muñeca, no contra
+    `INDEX_MCP` como en la primera versión de este archivo)."""
+    wrist = landmarks_xyz[WRIST]
+
+    thumb_extended = _dist3(wrist, landmarks_xyz[THUMB_TIP]) > (
+        _dist3(wrist, landmarks_xyz[THUMB_MCP]) * _THUMB_EXTENDED_RATIO
+    )
+
+    fingers = []
+    for _name, (mcp, tip) in FINGER_MCP_TIP.items():
+        extended = _dist3(wrist, landmarks_xyz[tip]) > (_dist3(wrist, landmarks_xyz[mcp]) * _FINGER_EXTENDED_RATIO)
+        fingers.append(extended)
+
+    return (thumb_extended, *fingers)
+
+
+def classify_world_landmarks(landmarks_xyz: List[Tuple[float, float, float]]) -> Tuple[Optional[str], int]:
+    """De 21 landmarks de mundo a la decisión final de gesto — punto de entrada
+    testeable sin cámara/MediaPipe real (basta con pasar landmarks sintéticos o de un
+    fixture guardado). Devuelve (gesto_o_None, cantidad_de_dedos_extendidos)."""
+    pattern = extended_fingers_pattern(landmarks_xyz)
+    n_extended = sum(pattern)
+
+    if pattern == (False, False, False, False, False):
+        return GESTURE_PUÑO_CERRADO, n_extended
+    if pattern == (True, False, False, False, False):
+        return GESTURE_DEDO_PULGAR, n_extended
+    if pattern == (False, False, False, False, True):
+        return GESTURE_DEDO_MENIQUE, n_extended
+    # Mismo criterio que Fase 8: >=4 dedos extendidos (aunque no sean exactamente los
+    # 5) cuenta como palma abierta — validado contra los fixtures reales de Fase A,
+    # ver BITACORA.md "Fase A": el pulgar a veces no cruza el umbral aunque la palma
+    # esté genuinamente abierta.
+    if n_extended >= 4:
+        return GESTURE_PALMA_ABIERTA, n_extended
+
+    # 2 o 3 dedos extendidos: fuera del catálogo de 4 gestos de esta fase.
+    return None, n_extended
 
 
 def format_line(result: GestureResult, min_confidence: float) -> Optional[str]:
     """Línea a mandar por `TcpServer.send_line` (sección 4.4 de CLAUDE.md) — solo
-    gesto + confianza en esta fase, nunca una instrucción de actuador (Fase 9).
-
-    Función libre (no depende de un modelo YOLO cargado) para poder testear la lógica
-    de umbral sin necesitar cámara ni pesos reales.
-    """
+    gesto + confianza, nunca una instrucción de actuador (Fase 9). Sin cambios de
+    formato desde Fase 8."""
     if result.gesture is None or result.confidence < min_confidence:
         return None
     return f"gesto: {result.gesture}, confianza: {result.confidence:.2f}"
 
 
 class GestureDetector:
-    """Detector real de gestos sobre frames JPEG crudos (Fase 8)."""
+    """Detector real de gestos sobre frames JPEG crudos — Fase B (MediaPipe)."""
 
-    def __init__(self, model_path: str, min_confidence: float) -> None:
-        from ultralytics import YOLO  # import perezoso: pesado, no hace falta en tests
+    def __init__(
+        self,
+        model_path: str,
+        min_confidence: float,
+        min_hand_detection_confidence: float = 0.5,
+        min_hand_presence_confidence: float = 0.5,
+        min_tracking_confidence: float = 0.5,
+    ) -> None:
+        # Import perezoso: mediapipe es pesado, no hace falta para importar el módulo
+        # (los tests de geometría pura no lo necesitan).
+        import mediapipe as mp
+        from mediapipe.tasks import python as mp_python
+        from mediapipe.tasks.python import vision as mp_vision
 
-        self._model = YOLO(model_path)
-        self._min_confidence = min_confidence
-        self._motion_gate = MotionGate()
-
-    def reset_motion_background(self) -> None:
-        """Ver `MotionGate.reset()` — usar tras un frame no representativo de la
-        escena real (p.ej. el warmup de arranque con un frame en negro)."""
-        self._motion_gate.reset()
-
-    def _find_person_roi(self, frame_bgr: np.ndarray) -> Optional[Tuple[int, int, int, int]]:
-        results = self._model.predict(
-            frame_bgr, classes=[YOLO_PERSON_CLASS_ID], verbose=False
+        self._mp = mp
+        base_options = mp_python.BaseOptions(model_asset_path=model_path)
+        options = mp_vision.HandLandmarkerOptions(
+            base_options=base_options,
+            # VIDEO, no IMAGE: habilita el tracking interno de MediaPipe entre frames
+            # de una misma conexión (usa min_tracking_confidence) en vez de re-detectar
+            # desde cero cada vez -- coherente con que los frames llegan en una
+            # secuencia temporal real, no como fotos sueltas sin relación.
+            running_mode=mp_vision.RunningMode.VIDEO,
+            num_hands=1,
+            min_hand_detection_confidence=min_hand_detection_confidence,
+            min_hand_presence_confidence=min_hand_presence_confidence,
+            min_tracking_confidence=min_tracking_confidence,
         )
-        boxes = results[0].boxes
-        if boxes is None or len(boxes) == 0:
-            return None
+        self._landmarker = mp_vision.HandLandmarker.create_from_options(options)
+        self._min_confidence = min_confidence
+        self._smoother = LandmarkSmoother()
+        self._last_timestamp_ms = 0
 
-        best_idx = int(boxes.conf.argmax())
-        x1, y1, x2, y2 = boxes.xyxy[best_idx].tolist()
-        h, w = frame_bgr.shape[:2]
-        x1, y1 = max(0, int(x1)), max(0, int(y1))
-        x2, y2 = min(w, int(x2)), min(h, int(y2))
-        if x2 <= x1 or y2 <= y1:
-            return None
-        return x1, y1, x2, y2
+    def _next_timestamp_ms(self) -> int:
+        # VIDEO mode exige timestamps estrictamente crecientes -- el reloj de pared
+        # puede repetirse entre dos llamadas muy seguidas (resolución de milisegundo),
+        # así que se fuerza el incremento mínimo de 1ms cuando eso pasa.
+        now_ms = int(time.time() * 1000)
+        self._last_timestamp_ms = max(now_ms, self._last_timestamp_ms + 1)
+        return self._last_timestamp_ms
 
     def detect(self, jpeg_bytes: bytes) -> GestureResult:
         arr = np.frombuffer(jpeg_bytes, dtype=np.uint8)
@@ -425,63 +319,25 @@ class GestureDetector:
             logger.warning("No se pudo decodificar un frame JPEG recibido (%d bytes)", len(jpeg_bytes))
             return GestureResult(None, 0.0, 0)
 
-        # DIAGNÓSTICO TEMPORAL (2026-09-18, ver BITACORA.md "Fase 8" — investigación de
-        # por qué el fix de falsos positivos dejó de detectar un puño real sostenido).
-        # A propósito en INFO, no DEBUG: el servicio en producción corre con
-        # CVA_LOG_LEVEL=INFO y esta sesión no tiene sudo para subirlo sin tocar código.
-        # Revertir a logger.debug (o quitar) una vez que se entienda la causa real.
-        frame_h, frame_w = frame.shape[:2]
-        logger.info("[diag] frame decodificado: %dx%d", frame_w, frame_h)
-
-        # Segundo fix de falsos positivos (2026-09-18, ver nota de módulo): el modelo
-        # de fondo se actualiza sobre el frame completo, en la misma escala/coordenadas
-        # cada vez, antes de recortar la ROI — así el fondo es consistente aunque la
-        # caja "persona" de YOLO se mueva un poco de un frame a otro.
-        motion_mask_full = self._motion_gate.update_and_get_motion_mask(frame)
-        if motion_mask_full is None:
-            logger.info("[diag] fondo de movimiento todavía no establecido (primer frame) — sin gesto todavía")
-            return GestureResult(None, 0.0, 0)
-
-        roi_box = self._find_person_roi(frame)
-        if roi_box is not None:
-            x1, y1, x2, y2 = roi_box
-            logger.info("[diag] persona detectada por YOLO: bbox=%s", roi_box)
-            # Excluir la franja superior de la caja "persona" (ahí suele estar la
-            # cara) antes de segmentar piel — fix de falsos positivos sin mano
-            # presente, ver BITACORA.md "Fase 8".
-            y1 = y1 + int((y2 - y1) * _FACE_EXCLUSION_TOP_FRACTION)
-            roi = frame[y1:y2, x1:x2]
-            roi_motion_mask = motion_mask_full[y1:y2, x1:x2]
-            logger.info("[diag] ROI tras excluir franja superior (%.0f%%): y1=%d..y2=%d, x1=%d..x2=%d",
-                        _FACE_EXCLUSION_TOP_FRACTION * 100, y1, y2, x1, x2)
-        else:
-            logger.info("[diag] YOLO NO detectó ninguna 'person' — se usa el frame completo como ROI")
-            roi = frame
-            roi_motion_mask = motion_mask_full
-
-        logger.info("[diag] píxeles en movimiento en la ROI: %d", int(np.count_nonzero(roi_motion_mask)))
-
-        contour = segment_hand(roi, motion_mask=roi_motion_mask)
-        if contour is None:
-            logger.info(
-                "[diag] segment_hand() no encontró ningún contorno de piel EN MOVIMIENTO "
-                "suficientemente grande en la ROI"
-            )
-            return GestureResult(None, 0.0, 0)
-
-        x, y, w, h = cv2.boundingRect(contour)
-        area = cv2.contourArea(contour)
-        hull_area = cv2.contourArea(cv2.convexHull(contour))
-        solidity = (area / hull_area) if hull_area > 0 else 0.0
-        plausible = _is_plausible_hand_contour(contour)
-        logger.info(
-            "[diag] contorno segmentado: area=%.0f bbox=%dx%d aspect=%.2f solidity=%.2f plausible=%s",
-            area, w, h, (h / w if w > 0 else 0.0), solidity, plausible,
+        mp_image = self._mp.Image(
+            image_format=self._mp.ImageFormat.SRGB, data=cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         )
+        timestamp_ms = self._next_timestamp_ms()
+        result = self._landmarker.detect_for_video(mp_image, timestamp_ms)
 
-        result = classify_contour(contour)
-        logger.info("[diag] resultado: gesture=%s confianza=%.2f dedos=%d", result.gesture, result.confidence, result.extended_fingers)
-        return result
+        if not result.hand_world_landmarks:
+            # Sin mano en este frame -- resetear el suavizado para que la próxima
+            # mano real que aparezca no arrastre un salto falso contra esta posición
+            # vieja (ver docstring de LandmarkSmoother).
+            self._smoother.reset()
+            return GestureResult(None, 0.0, 0)
+
+        raw_xyz = [(lm.x, lm.y, lm.z) for lm in result.hand_world_landmarks[0]]
+        smoothed_xyz = self._smoother.smooth(raw_xyz, timestamp_ms / 1000.0)
+
+        confidence = float(result.handedness[0][0].score)
+        gesture, extended = classify_world_landmarks(smoothed_xyz)
+        return GestureResult(gesture, confidence if gesture is not None else 0.0, extended)
 
     def format_line(self, result: GestureResult) -> Optional[str]:
         return format_line(result, self._min_confidence)

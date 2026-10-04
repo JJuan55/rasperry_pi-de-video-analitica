@@ -47,7 +47,11 @@ class _FakeWriter:
 async def test_first_frame_is_always_processed():
     detector = _StubDetector([GestureResult("puño_cerrado", 0.9, 0)])
     on_jpeg_frame = main_module._make_on_jpeg_frame(
-        detector, cooldown_seconds=5.0, stability_window=1, stability_min_matches=1
+        detector,
+        cooldown_seconds=5.0,
+        stability_window=1,
+        stability_min_matches=1,
+        stability_release_after_misses=1,
     )
 
     await on_jpeg_frame(b"frame", _FakeWriter())
@@ -58,7 +62,11 @@ async def test_first_frame_is_always_processed():
 async def test_frame_within_cooldown_window_is_skipped_without_calling_detector():
     detector = _StubDetector([GestureResult("puño_cerrado", 0.9, 0)])
     on_jpeg_frame = main_module._make_on_jpeg_frame(
-        detector, cooldown_seconds=5.0, stability_window=1, stability_min_matches=1
+        detector,
+        cooldown_seconds=5.0,
+        stability_window=1,
+        stability_min_matches=1,
+        stability_release_after_misses=1,
     )
     writer = _FakeWriter()
 
@@ -75,7 +83,11 @@ async def test_frame_after_cooldown_elapses_is_processed_again():
         GestureResult("palma_abierta", 0.9, 5),
     ])
     on_jpeg_frame = main_module._make_on_jpeg_frame(
-        detector, cooldown_seconds=0.15, stability_window=1, stability_min_matches=1
+        detector,
+        cooldown_seconds=0.15,
+        stability_window=1,
+        stability_min_matches=1,
+        stability_release_after_misses=1,
     )
     writer = _FakeWriter()
 
@@ -95,7 +107,11 @@ async def test_cooldown_counts_from_last_processed_attempt_even_without_gesture(
         GestureResult("puño_cerrado", 0.9, 0),
     ])
     on_jpeg_frame = main_module._make_on_jpeg_frame(
-        detector, cooldown_seconds=5.0, stability_window=1, stability_min_matches=1
+        detector,
+        cooldown_seconds=5.0,
+        stability_window=1,
+        stability_min_matches=1,
+        stability_release_after_misses=1,
     )
     writer = _FakeWriter()
 
@@ -113,7 +129,11 @@ async def test_cooldown_counts_from_last_processed_attempt_even_without_gesture(
 async def test_single_gesture_below_min_matches_is_not_sent():
     detector = _StubDetector([GestureResult("puño_cerrado", 0.9, 0)])
     on_jpeg_frame = main_module._make_on_jpeg_frame(
-        detector, cooldown_seconds=0.0, stability_window=3, stability_min_matches=2
+        detector,
+        cooldown_seconds=0.0,
+        stability_window=3,
+        stability_min_matches=2,
+        stability_release_after_misses=10,
     )
     writer = _FakeWriter()
 
@@ -126,7 +146,11 @@ async def test_single_gesture_below_min_matches_is_not_sent():
 async def test_gesture_seen_twice_in_window_gets_sent_once_confirmed():
     detector = _StubDetector([GestureResult("puño_cerrado", 0.9, 0)] * 2)
     on_jpeg_frame = main_module._make_on_jpeg_frame(
-        detector, cooldown_seconds=0.0, stability_window=3, stability_min_matches=2
+        detector,
+        cooldown_seconds=0.0,
+        stability_window=3,
+        stability_min_matches=2,
+        stability_release_after_misses=10,
     )
     writer = _FakeWriter()
 
@@ -147,7 +171,11 @@ async def test_one_noisy_frame_in_between_does_not_prevent_confirmation():
         GestureResult("puño_cerrado", 0.9, 0),
     ])
     on_jpeg_frame = main_module._make_on_jpeg_frame(
-        detector, cooldown_seconds=0.0, stability_window=3, stability_min_matches=2
+        detector,
+        cooldown_seconds=0.0,
+        stability_window=3,
+        stability_min_matches=2,
+        stability_release_after_misses=10,
     )
     writer = _FakeWriter()
 
@@ -165,7 +193,11 @@ async def test_three_different_gestures_never_confirm():
         GestureResult("palma_abierta", 0.5, 5),
     ])
     on_jpeg_frame = main_module._make_on_jpeg_frame(
-        detector, cooldown_seconds=0.0, stability_window=3, stability_min_matches=2
+        detector,
+        cooldown_seconds=0.0,
+        stability_window=3,
+        stability_min_matches=2,
+        stability_release_after_misses=10,
     )
     writer = _FakeWriter()
 
@@ -182,7 +214,11 @@ async def test_frame_without_gesture_does_not_confirm_but_does_not_erase_the_win
         GestureResult("puño_cerrado", 0.9, 0),
     ])
     on_jpeg_frame = main_module._make_on_jpeg_frame(
-        detector, cooldown_seconds=0.0, stability_window=3, stability_min_matches=2
+        detector,
+        cooldown_seconds=0.0,
+        stability_window=3,
+        stability_min_matches=2,
+        stability_release_after_misses=10,
     )
     writer = _FakeWriter()
 
@@ -202,7 +238,11 @@ async def test_capture_disabled_by_default_writes_no_file(tmp_path, monkeypatch)
     monkeypatch.setattr(main_module.config, "CAPTURE_FRAMES_DIR", None)
     detector = _StubDetector([GestureResult("puño_cerrado", 0.9, 0)])
     on_jpeg_frame = main_module._make_on_jpeg_frame(
-        detector, cooldown_seconds=0.0, stability_window=1, stability_min_matches=1
+        detector,
+        cooldown_seconds=0.0,
+        stability_window=1,
+        stability_min_matches=1,
+        stability_release_after_misses=1,
     )
 
     await on_jpeg_frame(b"frame", _FakeWriter())
@@ -214,7 +254,11 @@ async def test_capture_saves_processed_frame_with_gesture_label(tmp_path, monkey
     monkeypatch.setattr(main_module.config, "CAPTURE_FRAMES_DIR", str(tmp_path))
     detector = _StubDetector([GestureResult("puño_cerrado", 0.87, 0)])
     on_jpeg_frame = main_module._make_on_jpeg_frame(
-        detector, cooldown_seconds=0.0, stability_window=1, stability_min_matches=1
+        detector,
+        cooldown_seconds=0.0,
+        stability_window=1,
+        stability_min_matches=1,
+        stability_release_after_misses=1,
     )
 
     await on_jpeg_frame(b"contenido-jpeg-falso", _FakeWriter())
@@ -229,7 +273,11 @@ async def test_capture_saves_processed_frame_without_gesture_as_sin_gesto(tmp_pa
     monkeypatch.setattr(main_module.config, "CAPTURE_FRAMES_DIR", str(tmp_path))
     detector = _StubDetector([GestureResult(None, 0.0, 2)])
     on_jpeg_frame = main_module._make_on_jpeg_frame(
-        detector, cooldown_seconds=0.0, stability_window=1, stability_min_matches=1
+        detector,
+        cooldown_seconds=0.0,
+        stability_window=1,
+        stability_min_matches=1,
+        stability_release_after_misses=1,
     )
 
     await on_jpeg_frame(b"frame", _FakeWriter())
@@ -245,7 +293,11 @@ async def test_capture_saves_cooldown_skipped_frame_as_sin_evaluar_not_sin_gesto
     monkeypatch.setattr(main_module.config, "CAPTURE_FRAMES_DIR", str(tmp_path))
     detector = _StubDetector([GestureResult("puño_cerrado", 0.9, 0)])
     on_jpeg_frame = main_module._make_on_jpeg_frame(
-        detector, cooldown_seconds=5.0, stability_window=1, stability_min_matches=1
+        detector,
+        cooldown_seconds=5.0,
+        stability_window=1,
+        stability_min_matches=1,
+        stability_release_after_misses=1,
     )
 
     await on_jpeg_frame(b"frame1", _FakeWriter())  # se procesa, consume el único resultado

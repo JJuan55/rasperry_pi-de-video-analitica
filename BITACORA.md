@@ -1255,3 +1255,401 @@ reiniciar matando el PID (`Restart=always` lo revive leyendo el archivo actualiz
 **Esperando que JD confirme que está listo para hacer la sesión de prueba real** (los
 4 gestos, distintas distancias, un tono de piel distinto si consigue a alguien, y unos
 segundos sin mano) — avisar apenas termine para apagar la captura de inmediato.
+
+---
+
+## Fase B — reemplazar YOLO+OpenCV por MediaPipe HandLandmarker (2026-09-25)
+
+Con la Fase A cerrada con datos reales (ambas sesiones de captura, ver `BITACORA.md`
+de la rama `spike/fase8-mediapipe-viabilidad`, commits `1730153` y `10d71de`), JD
+aprobó avanzar a Fase B: esto ya es implementación real sobre
+`cva_gesture_bridge/vision/detector.py`, no un spike descartable — pero **todavía no
+se toca el `.venv` de producción ni se reinicia el servicio real sin autorización
+explícita**, igual que con el capturador temporal.
+
+### Housekeeping antes de tocar código
+
+1. **Rama huérfana en origin (`fase8-mediapipe-viabilidad`, sin el prefijo `spike/`):**
+   quedó abandonada cuando el trabajo real se continuó bajo `spike/fase8-mediapipe-viabilidad`
+   (la correctamente nombrada, con todos los commits). Pedido borrarla. **Bloqueado:**
+   esta sesión no tiene credenciales de push (mismo problema de siempre) — se le pidió
+   a JD el comando `git push origin --delete fase8-mediapipe-viabilidad` para que lo
+   corra él. **Pendiente de confirmación.**
+2. **Rama y worktree nuevos para Fase B:** `fase8-fase-b-mediapipe-pipeline`, creada
+   desde `main` (commit `109a112`, el mismo que `origin/main`). Worktree en
+   `~/video_analitica/cva-pi-repo-fase-b`, venv propio `.venv-fase-b/` (mismo patrón
+   que el spike — aislado del `.venv` de producción). **Pendiente de push inicial**
+   (mismo bloqueo de credenciales) — JD tiene los comandos para correrlo.
+
+### Investigación de dependencias — con evidencia real, no supuesta
+
+**¿`opencv-contrib-python` sirve como reemplazo drop-in de `opencv-python` en este
+proyecto?** Se listaron todos los símbolos de `cv2` realmente usados en
+`detector.py`/`main.py`/tests (`imencode`, `imdecode`, `cvtColor`, `inRange`,
+`morphologyEx`, `findContours`, `contourArea`, `convexHull`, `convexityDefects`,
+`boundingRect`, `threshold`, `dilate`, `absdiff`, `bitwise_and`,
+`getStructuringElement`, `ellipse`, `fillPoly`, `rectangle`, más las constantes) — se
+instaló `mediapipe` en el venv nuevo (que trae `opencv-contrib-python` como
+dependencia, **sin `opencv-python` instalado en absoluto**), se confirmó que los 28
+símbolos existen (`hasattr`, ninguno faltante), y **se corrió la suite completa de
+tests existente contra ese venv: 54 passed, 0 failed.** Confirmado empíricamente, no
+solo por documentación de que "contrib es superset" — **sí sirve como reemplazo
+drop-in** para el uso real de este proyecto.
+
+**¿Se puede sacar `torch`/`torchvision`/`ultralytics` de `requirements.txt`?** Sí,
+confirmado: ningún archivo del repo fuera de `detector.py` (que se va a reescribir
+para no usar YOLO) los importa, y el propio `GestureDetector.__init__` es el único
+punto que hace `from ultralytics import YOLO` — con MediaPipe localizando la mano
+directamente (sin necesitar YOLO para acotar la región "persona" primero), ese import
+desaparece por completo. `requirements.txt` de esta rama quedó reducido a
+`mediapipe==1.0.1` + `opencv-contrib-python==5.0.0.93` (esta última ya viene como
+dependencia transitiva de mediapipe, se fija la versión explícita de todos modos por
+reproducibilidad, mismo criterio que el resto del proyecto).
+
+**Nota:** esto es una decisión para *esta rama* (`fase8-fase-b-mediapipe-pipeline`) —
+`requirements.txt` de `main` no se toca todavía; el servicio real sigue con
+torch/torchvision/ultralytics/opencv-python hasta que Fase B se apruebe y se
+despliegue.
+
+### Implementación — `GestureDetector` con `HandLandmarker` (2026-09-25)
+
+Reescrito `cva_gesture_bridge/vision/detector.py` completo: `HandLandmarker` en
+`RunningMode.VIDEO` (timestamps estrictamente crecientes, `_next_timestamp_ms()`
+fuerza el mínimo incremento de 1ms si el reloj de pared se repite), clasificación
+sobre `hand_world_landmarks` (coordenadas de mundo 3D en metros, normalizadas por el
+tamaño real de la mano — no depende de qué tan cerca esté del lente), `OneEuroFilter`
++ `LandmarkSmoother` nuevos (suavizado de las 63 coordenadas de la secuencia
+temporal), y **retirados `MotionGate`, la segmentación HSV de piel y el recorte de
+franja superior** — el docstring del módulo documenta en detalle por qué (conflicto
+estructural real de `MotionGate` con una mano que cambia de gesto sin salir de
+cuadro, confusión geométrica cara/torso/mano de HSV a 320x240 — ambos ya
+confirmados con datos reales en Fase 8, no una corazonada). `GestureResult` y
+`GestureStabilizer` quedaron sin cambios (compatibles con `main.py` tal cual).
+`config.py`/`main.py` actualizados para instanciar `GestureDetector` con el modelo y
+los 3 umbrales propios de MediaPipe (`min_hand_detection_confidence`,
+`min_hand_presence_confidence`, `min_tracking_confidence`, default 0.5 cada uno,
+ajustables por variable de entorno). Modelo (`models/hand_landmarker.task`, 7,819,105
+bytes, mismo binario oficial de Google usado en el spike) descargado a esta rama,
+gitignorado (`*.task`).
+
+### Bug real encontrado y corregido: umbral de "pulgar extendido" en coordenadas de mundo
+
+Los ratios heredados del spike (`_THUMB_EXTENDED_RATIO=1.3`, medido contra el nudillo
+base del índice en vez de la muñeca) se habían marcado explícitamente en el código
+como "sujetos a ajuste con fixtures reales, no se dan por buenos a ciegas" — y en
+efecto, al probarlos contra un pulgar-arriba real (fixture real, ver abajo), el ratio
+medido fue **1.253, por debajo del umbral de 1.3** → se clasificaba como
+`puño_cerrado` en vez de `dedo_pulgar` (falso negativo real). Solución: medir el
+pulgar contra la **muñeca**, igual que los otros 4 dedos (antes era el único que se
+medía contra el nudillo del índice), con umbral recalibrado a **1.7** —
+midpoint entre el ratio real de un puño (1.424) y el de un pulgar-arriba real
+(2.184), con margen amplio a ambos lados. Verificado que esto no rompe la
+clasificación de puño ni de palma abierta contra los mismos fixtures reales (ver
+tabla abajo). El campo `INDEX_MCP` quedó sin uso tras el cambio y se eliminó.
+
+### Hallazgo real: las etiquetas de nombre de archivo de Fase A (sistema viejo,
+YOLO+OpenCV) NO son ground truth confiable
+
+Al elegir fixtures reales para los tests, se tomaron inicialmente los frames con
+mayor confianza por gesto según la etiqueta embebida en el nombre de archivo (ese
+nombre lo pone el sistema VIEJO en tiempo real durante la captura, no una anotación
+manual). Al inspeccionar las imágenes reales una por una (no solo confiar en el
+nombre), se encontró que **al menos 3 de los 4 archivos "mejor etiquetados" tenían la
+etiqueta equivocada**: los 3 candidatos con mayor confianza de "puño_cerrado" eran en
+realidad fotos reales de **pulgar arriba** (thumbs-up claro, visualmente inequívoco),
+y un candidato "dedo_menique" resultó ser un puño cerrado real. Esto es evidencia
+adicional, independiente de todo lo ya documentado en Fase 7/8, de por qué el sistema
+viejo era poco confiable — y una advertencia concreta para el futuro: **nunca usar la
+etiqueta de nombre de archivo de estos frames como ground truth sin inspección
+visual**, incluso dentro de esta misma carpeta de fixtures.
+
+### Fixtures reales — `tests/fixtures_real/` (gitignorado, fotos reales de JD, nunca al repo)
+
+Confirmados uno por uno visualmente (no por su nombre de archivo original) y luego
+verificados con el `GestureDetector` real de esta fase, cada uno con una instancia
+**nueva** (no compartida — ver más abajo por qué):
+
+| archivo                        | gesto real (confirmado a ojo) | `GestureDetector.detect()` | confianza |
+|---------------------------------|-------------------------------|------------------------------|-----------|
+| `fixture_puno_cerrado.jpg`      | puño cerrado                  | `puño_cerrado`               | 0.9983    |
+| `fixture_palma_abierta.jpg`     | palma abierta                 | `palma_abierta`              | 0.9678    |
+| `fixture_dedo_pulgar.jpg`       | pulgar arriba                 | `dedo_pulgar`                | 0.9894    |
+| `fixture_dedo_menique.jpg`      | meñique (reemplazado 2026-10-02, ver sección abajo) | `dedo_menique` | 0.9952 |
+| `persona_cara_sin_mano.jpg`     | cara+torso real, sin mano posada, redimensionado a 320x240 (resolución real del cliente) | `None` | 0.0 |
+| `persona_torso_sin_mano_1.jpg`  | torso real, sin mano en cuadro (frame real de una racha de 96 frames consecutivos con 0 manos, sesión 2 de Fase A) | `None` | 0.0 |
+| `persona_torso_sin_mano_2.jpg`  | ídem, otro frame de la misma racha | `None` | 0.0 |
+| frame negro sintético (240x320) | vacío                          | `None`                        | 0.0       |
+
+**Nota histórica sobre `fixture_dedo_menique.jpg` (resuelta, ver sección siguiente):**
+la primera versión de este fixture (confianza 0.9992) quedó con una salvedad
+documentada — el dedo levantado no se podía confirmar a ojo con certeza total desde
+la foto plana, por la rotación de la mano en ese frame. JD pidió una sesión nueva
+específicamente para resolver esto, y el fixture fue reemplazado — ver "Recaptura de
+`dedo_menique` sin ambigüedad visual (2026-10-02)" más abajo.
+
+**Caso histórico investigado y resuelto — cara/torso como falso positivo (pedido
+explícito de JD, `persona_cara_sin_mano.jpg` es la misma imagen que `zidane.jpg` del
+spike):** en Fase A, el benchmark original reportó "1 mano detectada" para esta foto.
+Investigado a fondo en esta fase: el detector **crudo** de MediaPipe, alimentado con
+la imagen a la resolución real del cliente (320x240, no a resolución completa —
+la discrepancia con corridas anteriores era justamente esa, resolución completa daba
+0 manos, 320x240 sí detecta algo), **sí encuentra un "hand" en esta cara/torso real**,
+con score de handedness alto (0.795–0.912 en 3 corridas). Esto **no es un falso
+negativo del modelo** — es un verdadero landmark geométrico que MediaPipe interpreta
+como mano en esa región de piel/tela. Lo que evita que esto llegue como un gesto real
+al cliente es la capa de clasificación de esta app: el patrón de dedos extendidos que
+resulta de esos landmarks (2 dedos "extendidos" en la corrida final verificada) no
+coincide con ninguno de los 4 patrones del catálogo (ni puño, ni palma, ni pulgar
+solo, ni meñique solo) — así que `classify_world_landmarks` devuelve `None`,
+`GestureResult.confidence` queda en 0.0, y `GestureStabilizer` nunca lo confirmaría
+aunque se repitiera (necesita el mismo gesto no-None 2 de 3 veces). **Resuelto y
+entendido, no ignorado** — con una salvedad honesta para el futuro: esta protección
+depende de que el patrón geométrico de un falso positivo de piel/cara no coincida
+por casualidad con uno de los 4 patrones específicos del catálogo; no es una garantía
+absoluta para cualquier imagen posible, es lo verificado contra los fixtures reales
+disponibles hoy.
+
+**Torso solo:** dos frames reales de una racha de 96 frames consecutivos con
+`num_hands==0` (confirmado por el propio análisis de Fase A, sesión 2, CSV
+`captured_frames_analysis_2026-09-25_v2.csv`) — JD sentado frente a cámara sin mano
+en cuadro. Ambos dan `None`/0.0 con el detector de esta fase, sin necesitar
+`MotionGate` para lograrlo.
+
+**Meta de JD ("cero falsos positivos de los tres tipos históricos: cara-como-puño,
+ruido de piel, torso-como-puño") — cumplida contra estos fixtures reales**, con la
+salvedad explícita de arriba sobre por qué (clasificación geométrica, no ausencia de
+detección cruda).
+
+### Descubrimiento de testing: `RunningMode.VIDEO` con fotos sueltas sin relación temporal
+
+Durante la investigación se encontró que reusar una misma instancia de
+`GestureDetector`/`HandLandmarker` para varias fotos reales sin relación temporal
+(no una secuencia de video real) da resultados **distintos según el orden y los
+timestamps** en que se le pasan — el mismo frame de `palma_abierta` pasó de "0 manos
+detectadas" a clasificar correctamente solo por usar una instancia nueva en vez de
+reusar una ya "contaminada" por el frame anterior. Tiene sentido: `VIDEO` mode asume
+continuidad temporal real entre llamadas (para eso existe el tracking interno) y
+fotos sueltas violan esa asunción. **No afecta el uso real en producción** (los
+frames del cliente sí son una secuencia real) — pero si afecta cómo se deben escribir
+tests contra fixtures reales: `tests/test_detector.py` usa una fixture
+`fresh_detector` (function-scoped, instancia nueva por test) por esta razón,
+documentado en el docstring del archivo.
+
+### Resultado de tests
+
+`tests/test_detector.py` reescrito completo (35 tests: geometría sintética de
+`extended_fingers_pattern`/`classify_world_landmarks`, `OneEuroFilter`/
+`LandmarkSmoother`, `format_line`, `GestureStabilizer` sin cambios, y 8 tests contra
+los fixtures reales de arriba). Suite completa del repo: **63 passed, 0 failed**
+(`.venv-fase-b/bin/pytest -q`).
+
+### Recaptura de `dedo_menique` sin ambigüedad visual (2026-10-02)
+
+JD pidió resolver la salvedad documentada arriba con una sesión de captura nueva,
+corta y puntual (mismo procedimiento ya usado dos veces en Fase A: descomentar
+`CVA_CAPTURE_FRAMES_DIR` en `.capture.env`, `sudo systemctl restart
+cva-gesture-bridge.service`, grabar, comentar de nuevo, reiniciar otra vez).
+
+**Primeros dos intentos no sirvieron** — JD hizo el gesto (puño con el meñique
+estirado) pero con la mano de canto/rotada hacia la cámara, igual que el fixture
+original: sin ver el pulgar en el cuadro, seguía sin poder confirmarse a ojo cuál
+dedo era. Se le pidió un tercer método, más simple y sin depender de rotar la
+muñeca: **mano abierta de frente a la cámara (palma visible) → ir doblando un dedo a
+la vez (pulgar, índice, medio, anular) hasta dejar solo el meñique**, repetido con
+ambas manos. Esto sí funcionó: dio una secuencia completa con un frame de referencia
+de palma abierta, lo que permite rastrear la posición del dedo que queda al final
+contra esa referencia, en vez de depender de una sola foto aislada.
+
+**Verificación, no solo inspección visual de una foto:** se comparó la posición del
+dedo levantado en el frame final contra la posición del meñique en el frame de
+palma abierta de la misma secuencia (mismo encuadre, mismo brazo levantado) — cae
+exactamente en el lugar del dedo más alejado del pulgar. Además, se corrió el
+`GestureDetector` real contra 14 frames candidatos (7 por mano, vecinos del momento
+de "1 dedo" en cada secuencia): **13 de 14 clasificaron `dedo_menique` con confianza
+entre 0.97 y 0.995** (el único que no, dio 2 dedos extendidos — frame de transición,
+descartado). Se eligió el de mayor confianza de la primera mano:
+`1790997084005__sin_gesto.jpg` (confianza 0.9952).
+
+**Reemplazado `tests/fixtures_real/fixture_dedo_menique.jpg`** con este frame.
+Vuelto a correr `GestureDetector.detect()` contra el nuevo fixture (instancia
+fresca, mismo criterio que el resto): `gesture=dedo_menique, confidence=0.9952,
+extended_fingers=1`. Quitada la salvedad de ambigüedad del comentario del test
+correspondiente en `tests/test_detector.py`, reemplazada por la explicación de cómo
+se verificó esta vez.
+
+**Suite completa: 63 passed, 0 failed** — mismo conteo que antes del reemplazo, sin
+romper nada.
+
+**Los 1946 frames de la sesión** (dos intentos fallidos + el exitoso, todos juntos
+porque el capturador no se desactivó entre intentos) se **movieron** (no copiaron) a
+`~/video_analitica/cva-pi-repo-spike/spike_mediapipe/captured_frames_2026-10-02_menique/`
+— mismo patrón que las dos sesiones de Fase A, gitignorado, nunca al repo. El
+patrón de `.gitignore` de esa rama (`spike/fase8-mediapipe-viabilidad`) solo cubría
+la fecha `2026-09-25` explícitamente — corregido a cualquier fecha
+(`captured_frames_*/`) antes de hacer cualquier `git add`, confirmado con `git
+status --ignored` que las 3 carpetas de sesiones reales quedan ignoradas. Commit
+`ee6eba1` en esa rama.
+
+Capturador desactivado y confirmado contra el proceso real (`CVA_CAPTURE_FRAMES_DIR`
+ya no está en el entorno del PID activo) al cierre de esta sesión.
+
+### Pendiente antes de cerrar Fase B
+
+- Push de ambas ramas (`fase8-fase-b-mediapipe-pipeline` y el fix de `.gitignore` en
+  `spike/fase8-mediapipe-viabilidad`) — bloqueado por credenciales, igual que el
+  housekeeping anterior; JD debe correrlo directamente.
+- Autorización explícita de JD antes de: tocar el `.venv` de producción, reiniciar
+  `cva-gesture-bridge.service` para desplegar (el reinicio para
+  activar/desactivar el capturador ya fue autorizado y usado, eso es distinto), o
+  desplegar este código — nada de eso se hizo ni se hará sin ese aviso previo.
+
+## Fase C2 — bajar el tiempo de confirmación de ~15s hacia AC3 (<1.5s) (2026-10-04)
+
+JD aprobó seguir con la Fase C2 del plan (`CVA_deteccion-gestos_plan.md` §3, no vive
+en este repo — ver CLAUDE.md) antes de medir contra AC3 o considerar despliegue:
+reconsiderar `GESTURE_COOLDOWN_SECONDS` y rediseñar la confirmación con datos reales,
+no a ojo. Sigue sobre `fase8-fase-b-mediapipe-pipeline`, mismo worktree. Nada de esto
+tocó el `.venv` de producción ni el servicio real.
+
+### 1. Costo real sostenido sin cooldown — `benchmarks/sustained_load.py`
+
+Corrido contra los 7805 frames reales disponibles (las 2 sesiones de Fase A + la
+sesión de recaptura de meñique), una sola instancia de `GestureDetector` (igual que
+producción), espalda con espalda sin ningún cooldown artificial, ~4.5 min seguidos:
+
+- Latencia por frame: avg=34.5ms, p50=31.9ms, p95=46.0ms, p99=68.7ms, max=111.9ms.
+- CPU: avg=100.7%, max=101.8% de 4 núcleos (1 solo núcleo saturado, sostenido, sin
+  degradarse en los 4.5 min).
+- RSS: 209.2MB → 214.2MB (estable, sin fuga).
+- El cliente real manda frames a ~7fps (~143ms entre frames, CLAUDE.md sección 2) —
+  margen de la Pi sobre ese ritmo: **4.1x en el caso típico (avg), 3.1x en el peor
+  caso medido (p95)**; incluso el frame más lento observado (111.9ms) queda dentro
+  del intervalo real entre frames.
+
+**Decisión, con el número que la respalda:** `GESTURE_COOLDOWN_SECONDS` pasa de `5`
+a **`0.0`** (eliminado, no solo bajado) — la Pi sostiene evaluar cada frame real sin
+saturarse, con margen real medido, no supuesto.
+
+### 2. Ruido real de clasificación por frame — `benchmarks/analyze_raw_stability.py` + `inspect_noise_composition.py`
+
+Corrido el detector real (sin cooldown, sin estabilizador) sobre las 3 sesiones
+completas, detectando automáticamente 40 tramos de gesto genuinamente sostenido
+(≥15 frames con el mismo gesto dominante, detectado por moda en una ventana de
+adelanto, no por la etiqueta del nombre de archivo del sistema viejo).
+
+- 31 de 40 tramos: **cero ruido**, el frame crudo coincidió con el gesto dominante
+  el 100% del tiempo.
+- Tasa de ruido global: avg=1.81%, máximo en un tramo=30.0% (el tramo más ruidoso,
+  de la sesión de recaptura de meñique).
+- Racha de ruido más larga observada en cualquier tramo: **14 frames seguidos**.
+- **Composición del ruido (88 frames de ruido en total, los 40 tramos): 100% fueron
+  `None`** (mano perdida un instante) — **0% fueron otro gesto real en conflicto**.
+  Confirmado explícitamente, no asumido (`inspect_noise_composition.py` desglosa
+  cada tramo con ruido y qué valor tomó cada frame de ruido).
+
+**Por qué esto importa para el diseño:** si el ruido real nunca es "otro gesto
+consistente", la histéresis (quedarse en el último gesto confirmado mientras la
+señal cruda se pierde, sin exigir que el gesto nuevo gane una mayoría para
+*mantenerse* confirmado) no corre el riesgo real de "pegar" un gesto incorrecto —
+solo necesita sobrevivir rachas de `None`.
+
+### 3. `GestureStabilizer` rediseñado — ventana por mayoría CON histéresis
+
+Reemplaza el esquema de Fase 8 (ventana de 3, 2 coincidencias, **sin** histéresis —
+un solo frame de ruido ya tiraba la confirmación a `None`, y con
+`GESTURE_COOLDOWN_SECONDS=5` eso eran ~15s en el peor caso: 3 detecciones procesadas
+× 5s). Dos reglas separadas, en `cva_gesture_bridge/vision/detector.py`:
+
+- **Confirmar/cambiar de gesto**: `min_matches` (default **5**) de las últimas
+  `window_size` (default **7**) observaciones crudas — no exige racha exacta.
+- **Soltar un gesto ya confirmado (histéresis)**: solo tras
+  `release_after_misses` (default **20**) observaciones SEGUIDAS que no sean el
+  gesto confirmado — con margen real (20) sobre la racha de ruido más larga medida
+  (14, punto 2 arriba), no un número arbitrario.
+
+`config.py` expone los tres como `GESTURE_STABILITY_WINDOW`,
+`GESTURE_STABILITY_MIN_MATCHES`, `GESTURE_RELEASE_AFTER_MISSES` (variables de
+entorno `CVA_*` correspondientes). `main.py` actualizado para pasar el tercer
+parámetro a `GestureStabilizer`.
+
+### 4. Tiempo de confirmación real, simulado con datos reales — `benchmarks/simulate_confirmation_time.py`
+
+No es una medición con hardware real todavía (eso es Fase D) — es una simulación
+honesta: la MISMA secuencia cruda de gestos que salió del detector real sobre los
+3727+2132+1946 frames capturados, con sus timestamps REALES de llegada (no un fps
+asumido), pasada por el `GestureStabilizer` nuevo (cooldown≈0, se evalúa cada
+frame), un solo stabilizer por sesión (igual que producción: una instancia por
+conexión).
+
+- **39 de 40 tramos confirmados dentro de AC3 (<1500ms).**
+- Tiempo de confirmación: avg=597ms, p50=573ms, p95=825ms, min=0ms (2 tramos
+  llegaron ya confirmados por histéresis desde un tramo anterior del mismo gesto,
+  sin necesitar reconfirmar nada).
+- **1 tramo superó AC3: 2205ms** (el primer tramo de la sesión de recaptura de
+  meñique). Investigado, no descartado sin más: entre los frames 35 y 36 de esa
+  sesión hay un salto real de **~1.75s** en la llegada de frames — un hueco real de
+  arranque de sesión, no una lentitud del algoritmo. **Hallazgo adicional, honesto,
+  no buscado a propósito:** ese mismo hueco (~1.7-1.8s) aparece en el mismo índice
+  de frame (~35) en las **3** sesiones grabadas independientemente, y después
+  reaparecen huecos más chicos (~500-600ms) cada ~34 frames durante toda cada
+  sesión — un patrón sistemático en la cadencia real de llegada de frames del
+  capturador/cliente viejo, no algo que `GestureStabilizer` pueda arreglar ni que
+  esta fase introdujo. Si AC3 necesita cumplirse sin excepción, esto es candidato a
+  investigarse aparte (posible tema de Fase D) — no se investiga más a fondo aquí
+  porque excede el alcance de "rediseñar la confirmación".
+
+### 5. Verificación de falsos positivos contra el esquema nuevo (no solo el detector crudo)
+
+Pedido explícito de JD: correr la batería de fixtures contra el **esquema de
+confirmación nuevo**, porque la histéresis es justo el mecanismo que podría hacer
+que un falso positivo aislado se "pegara" más tiempo si estuviera mal diseñado.
+Nuevos tests en `tests/test_detector.py` (detector real + `GestureStabilizer` real
+juntos, mismo fixture alimentado 30 veces seguidas simulando una vista sostenida):
+
+- Cara real sin mano (`persona_cara_sin_mano.jpg`, 30 observaciones): **nunca
+  confirma ningún gesto.**
+- Torso real sin mano (`persona_torso_sin_mano_1.jpg`, 30 observaciones): **nunca
+  confirma ningún gesto.**
+- Frame negro sintético (30 observaciones): **nunca confirma ningún gesto.**
+- Control positivo (`fixture_puno_cerrado.jpg`, 10 observaciones): confirma
+  `puño_cerrado` correctamente — confirma que el esquema nuevo sí reconoce el caso
+  válido, no solo que rechaza los falsos positivos.
+
+**Meta de JD cumplida: cero falsos positivos de los 3 tipos históricos contra el
+esquema de confirmación nuevo**, con el mismo criterio de honestidad que el resto
+del proyecto (ver también la salvedad ya documentada en Fase B sobre por qué esta
+protección depende del patrón geométrico, no es una garantía absoluta para
+cualquier imagen posible).
+
+### Resultado de tests
+
+`tests/test_detector.py`: stabilizer reescrito completo (8 tests nuevos de
+histéresis, reemplazan los 6 de Fase 8) + 4 tests nuevos de integración
+detector+stabilizer contra fixtures reales. `tests/test_main.py`: las 13 llamadas a
+`_make_on_jpeg_frame` actualizadas con el parámetro nuevo
+(`stability_release_after_misses`), comportamiento verificado sin cambios para los
+casos que ya cubrían. **Suite completa: 69 passed, 0 failed**
+(`.venv-fase-b/bin/pytest -q`).
+
+### Scripts de esta fase (no se importan desde `cva_gesture_bridge`, no son parte del paquete)
+
+`benchmarks/sustained_load.py`, `analyze_raw_stability.py`,
+`cache_raw_sequences.py` (caché intermedio, gitignorado, regenerable),
+`inspect_noise_composition.py`, `simulate_confirmation_time.py` — todos corren con
+`.venv-fase-b/bin/python`, documentados con su propio docstring explicando qué
+miden y por qué.
+
+### Pendiente antes de cerrar Fase C2 / para Fase D
+
+- Push de la rama — bloqueado por credenciales, igual que siempre.
+- Autorización explícita de JD antes de tocar el `.venv` de producción o el
+  servicio real — nada de eso se hizo aquí.
+- El hallazgo del punto 4 (huecos sistemáticos de llegada de frames, ~1.7-1.8s cerca
+  del frame 35 de cada sesión, ~500-600ms cada ~34 frames después) no se investigó
+  a fondo — queda anotado para cuando llegue la medición end-to-end real de Fase D
+  contra AC3 con hardware real, donde si vuelve a aparecer sí bloquearía el
+  criterio de aceptación.
+- La simulación del punto 4 usa frames ya capturados por el sistema VIEJO (Fase 8)
+  con su propia cadencia real de llegada — no es lo mismo que medir end-to-end con
+  el bridge de Fase B corriendo de verdad contra un cliente real. Es la mejor
+  aproximación disponible sin tocar producción; la medición definitiva es Fase D.

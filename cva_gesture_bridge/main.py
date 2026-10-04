@@ -1,7 +1,9 @@
 """Punto de entrada del bridge.
 
-Fase 8: además de recibir/loguear frames (Fase 6) y medir latencia (Fase 7), corre el
-detector de gestos real sobre cada frame y manda el resultado de vuelta al cliente.
+Además de recibir/loguear frames (Fase 6) y medir latencia (Fase 7), corre el detector
+de gestos real (MediaPipe HandLandmarker desde Fase B, ver
+cva_gesture_bridge/vision/detector.py) sobre cada frame y manda el resultado de vuelta
+al cliente.
 """
 
 import asyncio
@@ -51,6 +53,7 @@ def _make_on_jpeg_frame(
     cooldown_seconds: float,
     stability_window: int,
     stability_min_matches: int,
+    stability_release_after_misses: int,
 ):
     # last_processed_at y stabilizer viven en este closure, creado una sola vez por
     # arranque del bridge — tanto el cooldown como la ventana de estabilidad son
@@ -58,7 +61,11 @@ def _make_on_jpeg_frame(
     # uso real de este proyecto, una sola conexión persistente por sesión, equivale a
     # cooldown/estabilidad por sesión).
     last_processed_at = None
-    stabilizer = GestureStabilizer(window_size=stability_window, min_matches=stability_min_matches)
+    stabilizer = GestureStabilizer(
+        window_size=stability_window,
+        min_matches=stability_min_matches,
+        release_after_misses=stability_release_after_misses,
+    )
     capture_dir = config.CAPTURE_FRAMES_DIR  # leído una vez al armar el callback
 
     async def on_jpeg_frame(jpeg_bytes: bytes, writer: asyncio.StreamWriter) -> None:
@@ -82,9 +89,9 @@ def _make_on_jpeg_frame(
         last_processed_at = now
 
         loop = asyncio.get_running_loop()
-        # La inferencia YOLO+OpenCV es CPU-bound y no async — se corre en un thread
-        # aparte para no bloquear el loop mientras dura (cientos de ms, ver benchmark
-        # de Fase 8 en BITACORA.md).
+        # La inferencia de MediaPipe es CPU-bound y no async — se corre en un thread
+        # aparte para no bloquear el loop mientras dura (~35-65ms medido en el spike,
+        # ver BITACORA.md "Fase A"/"Fase B").
         result = await loop.run_in_executor(None, detector.detect, jpeg_bytes)
 
         if capture_dir:
@@ -128,18 +135,17 @@ def _make_on_jpeg_frame(
 
 
 def _warm_up(detector: GestureDetector) -> None:
-    # La primera inferencia real de YOLO es notablemente más lenta que las siguientes
-    # (~1.8s vs. ~0.44s medido en esta Pi, ver BITACORA.md "Fase 8") — se paga ese costo
-    # una vez al arrancar, en vez de en el primer gesto real de un cliente.
+    # La primera inferencia real puede ser algo más lenta que las siguientes (carga
+    # perezosa interna del modelo) — se paga ese costo una vez al arrancar, en vez de
+    # en el primer gesto real de un cliente. Fase B (MediaPipe) ya no necesita el
+    # reset de fondo que sí hacía falta con MotionGate (Fase 8, retirado — ver
+    # docstring de detector.py) porque no hay ningún estado de "fondo" que ensuciar
+    # con el frame en negro; `LandmarkSmoother` solo acumula estado cuando hay una
+    # mano real detectada, y el frame de warmup no tiene ninguna.
     blank_frame = np.zeros((480, 640, 3), dtype=np.uint8)
     ok, jpeg_bytes = cv2.imencode(".jpg", blank_frame)
     if ok:
         detector.detect(jpeg_bytes.tobytes())
-        # El frame en negro del warmup no es la escena real — sin este reset,
-        # MotionGate lo aprendería como "fondo" y el primer frame real completo
-        # aparecería como "movimiento" en todas partes (ver BITACORA.md "Fase 8",
-        # segundo fix de falsos positivos).
-        detector.reset_motion_background()
         logger.info("Detector de gestos precalentado (warmup de arranque)")
 
 
@@ -159,7 +165,13 @@ def _prepare_capture_dir_if_configured() -> None:
 
 async def run() -> None:
     _prepare_capture_dir_if_configured()
-    detector = GestureDetector(config.YOLO_MODEL, config.MIN_CONFIDENCE)
+    detector = GestureDetector(
+        config.MEDIAPIPE_MODEL_PATH,
+        config.MIN_CONFIDENCE,
+        config.MEDIAPIPE_MIN_HAND_DETECTION_CONFIDENCE,
+        config.MEDIAPIPE_MIN_HAND_PRESENCE_CONFIDENCE,
+        config.MEDIAPIPE_MIN_TRACKING_CONFIDENCE,
+    )
     _warm_up(detector)
     server = TcpServer(
         config.BRIDGE_HOST,
@@ -170,6 +182,7 @@ async def run() -> None:
             config.GESTURE_COOLDOWN_SECONDS,
             config.GESTURE_STABILITY_WINDOW,
             config.GESTURE_STABILITY_MIN_MATCHES,
+            config.GESTURE_RELEASE_AFTER_MISSES,
         ),
     )
     await server.start()
