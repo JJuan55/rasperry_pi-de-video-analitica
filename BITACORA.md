@@ -1653,3 +1653,156 @@ miden y por qué.
   con su propia cadencia real de llegada — no es lo mismo que medir end-to-end con
   el bridge de Fase B corriendo de verdad contra un cliente real. Es la mejor
   aproximación disponible sin tocar producción; la medición definitiva es Fase D.
+
+## Fase C2 — corrección antes de Fase D (2026-10)
+
+Revisión externa de `afe5f7b` (ya fusionado en `main` vía PR #2) encontró que
+`main.py` no usaba bien el `GestureStabilizer` nuevo: mandaba el resultado CRUDO de
+cada frame, no el gesto ya CONFIRMADO, y con `GESTURE_COOLDOWN_SECONDS≈0` eso
+significaba una línea por frame mientras se sostenía un gesto. Trabajo hecho sobre
+una rama nueva desde `main` (`fase-c2-fix-confirmed-output`, worktree
+`~/video_analitica/cva-pi-repo-fase-c2-fix`) — no toca el `.venv` de producción ni
+el servicio real.
+
+### 1. Bug real confirmado antes de tocar nada
+
+`cva_gesture_bridge/main.py` línea 130 (antes del fix): `detector.format_line(result)`
+usaba `result` (el `GestureResult` crudo de ESE frame), no `confirmed_gesture` (lo
+que de verdad gatea el envío un poco más arriba). Con un gesto sostenido y
+`cooldown≈0`, un solo frame ruidoso de otro gesto (ej. `dedo_pulgar` en medio de un
+`puño_cerrado` sostenido) se mandaba al cliente tal cual, aunque el gesto
+*confirmado* siguiera siendo `puño_cerrado` por histéresis. Confirmado leyendo el
+código real antes de asumir que el reporte externo tenía razón.
+
+### 2. Gesto confirmado + confianza asociada
+
+`GestureStabilizer.observe()` ahora recibe `confidence` además de `gesture`, y
+expone `confirmed_confidence` (propiedad de solo lectura): la confianza del
+**último frame que coincidió con el gesto confirmado**, no la del frame crudo
+actual (que puede ser de otro gesto por ruido aislado). Elegida esta opción (vs.
+promediar toda la ventana) porque refleja la evidencia más reciente real del gesto
+sostenido, sin arrastrar confianzas viejas de muy atrás en una sesión larga de
+histéresis, y es la más simple de razonar/testear. `main.py` arma la línea con
+`detector.format_line(confirmed_gesture, stabilizer.confirmed_confidence)`, no con
+`result`. `format_line()` (función libre y método de `GestureDetector`) cambiaron
+de firma: toman `gesture`/`confidence` sueltos, ya no un `GestureResult` completo.
+
+### 3. Enviar solo en el cambio, con evento explícito de liberación
+
+Con `cooldown≈0` (Fase C2), antes de este fix se mandaba una línea por cada frame
+procesado mientras un gesto seguía confirmado. Ahora `main.py` guarda
+`last_sent_gesture` en el closure y solo llama a `TcpServer.send_line` cuando
+`confirmed_gesture` cambia respecto al último valor mandado:
+
+- Gesto nuevo confirmado (o cambio de gesto): se manda `"gesto: X, confianza: Y"`
+  una sola vez.
+- Gesto confirmado se suelta (histéresis libera): se manda `RELEASE_LINE =
+  "gesto: ninguno"` una sola vez — evento explícito para que el cliente, y la Fase
+  9 cuando ejecute instrucciones reales, sepan que terminó en vez de inferirlo por
+  silencio.
+- Nada se manda al arrancar si nunca hubo nada confirmado (el chequeo
+  `confirmed_gesture == last_sent_gesture` con ambos en `None` lo cubre).
+
+**Sobre el "latido periódico" que planteaba el reporte** (reenviar la línea cada
+cierto intervalo mientras se sostiene, útil si un actuador real necesita
+refrescarse continuamente): **no se implementó en esta corrección.** No hay datos
+reales todavía para justificar un intervalo — el único caso de uso que lo
+necesitaría (Fase 9, accionar un actuador de forma continua mientras se sostiene un
+gesto, ej. un robot que debe seguir moviéndose) no está construido, así que
+cualquier número que se elija ahora sería inventado, no medido. Queda anotado como
+decisión pendiente para cuando Fase 9 defina los requisitos reales de control
+continuo — si hace falta, se agrega entonces con el mismo criterio de "con datos,
+no a ojo" del resto de este proyecto.
+
+### 4. Tiempo de liberación — dos umbrales, con un hallazgo real que corrigió la intuición inicial
+
+Con un solo `release_after_misses=20`, retirar la mano de cuadro de verdad dejaba
+un "gesto fantasma" confirmado ~2.86s de más (20 misses × ~143ms) — problema real
+si esto llega a controlar un actuador. La intuición inicial (y la del reporte
+externo) era: "mano ausente no tiene ambigüedad que proteger, se puede soltar casi
+de inmediato" — un umbral corto, separado del que protege contra ruido con mano
+presente.
+
+**Esa intuición no se sostuvo contra los datos reales.** Se extendió el caché de
+secuencias (`cache_raw_sequences.py`, ahora guarda también `extended_fingers`) y se
+corrió `benchmarks/inspect_noise_by_hand_presence.py` sobre los mismos 40 tramos de
+gesto genuinamente sostenido: de 87 frames de ruido total, 23 (26.4%) fueron mano
+AUSENTE (`gesture=None`, `extended_fingers==0` — el único caso donde eso pasa
+junto, ver `classify_world_landmarks`) y 64 (73.6%) mano presente pero
+ambigua/conflicto. **La racha de ruido más larga con mano ausente fue 13 frames
+seguidos — casi igual que los 14 de mano presente.** Un umbral corto (se había
+puesto un placeholder de 3 mientras llegaban los datos) habría soltado gestos
+reales genuinamente sostenidos por error, cada vez que MediaPipe perdiera el
+tracking un instante por un micro-ajuste de la mano.
+
+**Decisión final, con margen real sobre el peor caso de cada tipo, no una
+asimetría grande:**
+
+- `GESTURE_RELEASE_AFTER_MISSES` (mano presente/ambigua) = **20** (margen sobre 14,
+  sin cambios respecto al valor original de Fase C2).
+- `GESTURE_RELEASE_AFTER_MISSES_NO_HAND` (mano realmente ausente) = **16** (margen
+  sobre 13).
+
+**Compromiso explícito, no resuelto a fondo:** esto da una mejora real pero
+modesta en el caso de mano retirada de verdad (2.86s → 2.29s), no la mejora grande
+que la intuición inicial sugería — los datos no la soportan sin arriesgar
+liberaciones falsas durante sostenimientos reales. Una liberación más rápida
+todavía podría valer la pena, pero necesitaría una señal mejor que "cuadros
+seguidos sin mano cruda" (ej. alguna noción de tendencia/confianza acumulada) —
+queda anotado para Fase D si JD lo considera necesario, no inventado aquí.
+
+`hand_present` se calcula en `main.py` como
+`not (result.gesture is None and result.extended_fingers == 0)` y se pasa a
+`stabilizer.observe()` en cada frame.
+
+### 5. Validación de punta a punta contra datos reales (no solo tests sintéticos)
+
+`benchmarks/simulate_full_pipeline.py` reproduce el pipeline completo (observe con
+confidence/hand_present, envío solo en el cambio, evento de liberación) sobre las
+3 sesiones reales cacheadas:
+
+| sesión | frames reales | líneas que se habrían mandado (antes: 1 por frame) | gestos | liberaciones |
+|---|---|---|---|---|
+| `captured_frames_2026-09-25` | 2132 | 17 | 14 | 3 |
+| `captured_frames_2026-09-25_v2` | 3727 | 35 | 18 | 17 |
+| `captured_frames_2026-10-02_menique` | 1946 | 19 | 12 | 7 |
+
+Inspección manual de la secuencia completa (no solo el conteo): cada cambio de
+gesto real produce exactamente una línea `"gesto: X"`, y en la sesión `_v2`
+(protocolo "mano fuera de cuadro entre gestos") cada retiro real de mano produce su
+`"gesto: ninguno"` antes del siguiente gesto — patrón alternado limpio, consistente
+con el protocolo real de esa sesión.
+
+### 6. Tests
+
+`tests/test_detector.py`: `format_line` actualizado a la firma nueva (3 tests);
+`GestureStabilizer` — 4 tests nuevos (`confirmed_confidence` sigue al último frame
+que coincide, se resetea a 0.0 al soltar, los dos umbrales se usan por separado
+según `hand_present`, el default de mano ausente (16) sobrevive el peor caso real
+medido (13)).
+
+`tests/test_main.py` reescrito: además de actualizar las 13 llamadas a
+`_make_on_jpeg_frame` (parámetro nuevo), se agregaron los 4 casos pedidos
+explícitamente en la revisión — `test_sustained_gesture_sends_exactly_one_message_not_one_per_frame`
+(puño sostenido 10 frames → 1 solo mensaje, con `detector.calls==10` confirmando
+que sí se siguió evaluando cada frame), `test_a_single_noisy_frame_while_already_confirmed_does_not_resend`
+(frame ruidoso ya confirmado → no reenvía), `test_gesture_switch_sends_exactly_once_and_only_after_reaching_majority`
+(cambio de gesto → un solo envío, y recién al alcanzar mayoría, verificado paso a
+paso) y `test_removing_the_hand_emits_release_event_after_the_configured_misses`
+(retirar la mano → evento de liberación en el tiempo configurado, no antes). Se
+agregó además `test_hand_present_but_ambiguous_noise_uses_the_long_release_threshold_not_the_fast_one`
+para blindar explícitamente la distinción de los dos umbrales.
+
+**Suite completa: 78 passed, 0 failed** (`.venv-fase-c2-fix/bin/pytest -q`,
+antes de esta corrección: 69).
+
+### Pendiente
+
+- Push de esta rama — bloqueado por credenciales, igual que siempre.
+- Autorización explícita de JD antes de tocar el `.venv` de producción o el
+  servicio real — nada de eso se hizo aquí.
+- El "latido periódico" para Fase 9 (punto 3) queda sin implementar, a propósito,
+  por falta de datos reales de requisitos de control continuo.
+- El umbral de liberación con mano ausente (punto 4) quedó con una mejora modesta,
+  no la agresiva que se había planteado al principio — una señal mejor que "cuadros
+  seguidos sin mano cruda" podría ajustarlo más en el futuro, con datos.

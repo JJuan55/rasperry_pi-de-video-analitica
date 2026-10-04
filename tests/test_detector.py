@@ -170,18 +170,18 @@ def test_classify_world_landmarks_index_only_is_outside_catalog():
 
 
 def test_format_line_returns_none_without_gesture():
-    result = GestureResult(gesture=None, confidence=0.0, extended_fingers=2)
-    assert format_line(result, min_confidence=0.5) is None
+    # Fase C2 (corrección antes de Fase D): format_line ahora toma gesto/confianza
+    # sueltos, no un GestureResult -- lo que se formatea es el gesto ya CONFIRMADO
+    # por GestureStabilizer, no el resultado crudo de un solo frame.
+    assert format_line(None, confidence=0.0, min_confidence=0.5) is None
 
 
 def test_format_line_returns_none_below_confidence_threshold():
-    result = GestureResult(gesture=GESTURE_DEDO_MENIQUE, confidence=0.3, extended_fingers=1)
-    assert format_line(result, min_confidence=0.5) is None
+    assert format_line(GESTURE_DEDO_MENIQUE, confidence=0.3, min_confidence=0.5) is None
 
 
 def test_format_line_formats_gesture_and_confidence_above_threshold():
-    result = GestureResult(gesture=GESTURE_DEDO_MENIQUE, confidence=0.876, extended_fingers=1)
-    line = format_line(result, min_confidence=0.5)
+    line = format_line(GESTURE_DEDO_MENIQUE, confidence=0.876, min_confidence=0.5)
     assert line == "gesto: dedo_menique, confianza: 0.88"
 
 
@@ -325,11 +325,86 @@ def test_stabilizer_default_parameters_match_the_calibrated_values():
     for _ in range(5):
         result = stabilizer.observe(GESTURE_PUÑO_CERRADO)
     assert result == GESTURE_PUÑO_CERRADO  # confirma con el default de min_matches=5
+    # hand_present=True por default -- usa release_after_misses (20), no el umbral
+    # rápido de mano ausente.
     for _ in range(19):
         result = stabilizer.observe(None)
     assert result == GESTURE_PUÑO_CERRADO  # todavía no llega a release_after_misses=20
     result = stabilizer.observe(None)
     assert result is None  # el miss número 20 sí suelta
+
+
+# --- Fase C2, corrección antes de Fase D: confirmed_confidence + histéresis con
+# dos umbrales según mano presente/ausente (ver BITACORA.md) ----------------------
+
+
+def test_stabilizer_confirmed_confidence_tracks_the_last_matching_observation():
+    stabilizer = GestureStabilizer(window_size=3, min_matches=2)
+    stabilizer.observe(GESTURE_PUÑO_CERRADO, confidence=0.80)
+    stabilizer.observe(GESTURE_PUÑO_CERRADO, confidence=0.95)  # confirma acá
+    assert stabilizer.confirmed_confidence == 0.95
+
+    # Un frame de ruido (gesto distinto) NO debe pisar la confianza confirmada --
+    # sigue siendo la del último frame que sí coincidió con puño_cerrado.
+    stabilizer.observe(GESTURE_DEDO_PULGAR, confidence=0.99)
+    assert stabilizer.confirmed_confidence == 0.95
+
+    stabilizer.observe(GESTURE_PUÑO_CERRADO, confidence=0.88)
+    assert stabilizer.confirmed_confidence == 0.88
+
+
+def test_stabilizer_confirmed_confidence_resets_to_zero_after_release():
+    stabilizer = GestureStabilizer(window_size=3, min_matches=2, release_after_misses_no_hand=2)
+    stabilizer.observe(GESTURE_PUÑO_CERRADO, confidence=0.9)
+    stabilizer.observe(GESTURE_PUÑO_CERRADO, confidence=0.9)
+    assert stabilizer.confirmed_confidence == 0.9
+
+    for _ in range(2):
+        stabilizer.observe(None, hand_present=False)
+    assert stabilizer.confirmed_confidence == 0.0
+
+
+def test_stabilizer_hand_absent_releases_faster_than_hand_present_ambiguous():
+    # Mismo ruido (14 observaciones de None), la única diferencia es hand_present --
+    # confirma que los dos umbrales realmente se usan por separado.
+    release_after_misses = 20
+    release_after_misses_no_hand = 10
+
+    stabilizer_no_hand = GestureStabilizer(
+        window_size=7, min_matches=5,
+        release_after_misses=release_after_misses,
+        release_after_misses_no_hand=release_after_misses_no_hand,
+    )
+    stabilizer_hand_present = GestureStabilizer(
+        window_size=7, min_matches=5,
+        release_after_misses=release_after_misses,
+        release_after_misses_no_hand=release_after_misses_no_hand,
+    )
+    for _ in range(5):
+        stabilizer_no_hand.observe(GESTURE_PUÑO_CERRADO)
+        stabilizer_hand_present.observe(GESTURE_PUÑO_CERRADO)
+
+    result_no_hand = None
+    result_hand_present = None
+    for _ in range(14):
+        result_no_hand = stabilizer_no_hand.observe(None, hand_present=False)
+        result_hand_present = stabilizer_hand_present.observe(None, hand_present=True)
+
+    assert result_no_hand is None  # se soltó (14 >= release_after_misses_no_hand=10)
+    assert result_hand_present == GESTURE_PUÑO_CERRADO  # se mantiene (14 < 20)
+
+
+def test_stabilizer_no_hand_default_survives_the_worst_real_burst_measured():
+    # Hallazgo real de Fase C2 (benchmarks/inspect_noise_by_hand_presence.py): la
+    # racha de ruido de mano ausente más larga dentro de un gesto genuinamente
+    # sostenido fue 13 frames -- con el default (16) no debe soltarse.
+    stabilizer = GestureStabilizer()  # release_after_misses_no_hand=16 por default
+    for _ in range(5):
+        stabilizer.observe(GESTURE_PUÑO_CERRADO)
+    result = None
+    for _ in range(13):
+        result = stabilizer.observe(None, hand_present=False)
+    assert result == GESTURE_PUÑO_CERRADO
 
 
 # --- Fixtures reales (Fase A -> Fase B) -------------------------------------------
