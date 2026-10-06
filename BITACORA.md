@@ -1806,3 +1806,164 @@ antes de esta corrección: 69).
 - El umbral de liberación con mano ausente (punto 4) quedó con una mejora modesta,
   no la agresiva que se había planteado al principio — una señal mejor que "cuadros
   seguidos sin mano cruda" podría ajustarlo más en el futuro, con datos.
+
+## Fase D — plan de medición end-to-end contra AC3 (2026-10, PASO 1: sin ejecutar todavía)
+
+Revisión externa de `fd3a288` (rama `fase-c2-fix-confirmed-output`): corrección
+aprobada, 78 tests confirmados. JD autorizó Fase D por el **camino A**: el cliente
+tiene el puerto fijo en 8766 (`DEFAULT_CVA_BRIDGE_PORT`, `reference/bridge.rs`), así
+que no se puede correr la instancia de prueba en otro puerto en paralelo — se
+necesita parar el servicio real un rato y correr la instancia de prueba en el mismo
+puerto, mientras dure la medición.
+
+**Esto es el plan, todavía NO ejecutado.** Documentado acá primero para revisión de
+JD antes de tocar el servicio real, por pedido explícito.
+
+### Reglas fijas de esta fase
+
+1. El código que se mide sale de `fase-c2-fix-confirmed-output`, desde su propio
+   worktree (`~/video_analitica/cva-pi-repo-fase-c2-fix`) y su propio venv
+   (`.venv-fase-c2-fix`). La carpeta de producción
+   (`~/video_analitica/rasperry_pi-de-video-analitica`), su `.venv` y el archivo del
+   servicio no se tocan — nada de `git pull` ahí.
+2. La instancia de prueba la arranca Claude a mano, en el puerto 8766, **solo
+   mientras JD haya detenido el servicio real**. Los únicos comandos `sudo` los
+   corre JD: detener el servicio al empezar, volver a arrancarlo al terminar.
+3. Si aparece un defecto durante la medición, no se arregla en silencio — se
+   reporta primero, y el arreglo (si corresponde) va en un commit aparte con su
+   propio test, no mezclado con los datos de la medición.
+
+### 1. Comandos exactos para JD (copiables, sin interpretación)
+
+**Al empezar — detener el servicio real y confirmar el puerto libre:**
+```bash
+sudo systemctl stop cva-gesture-bridge.service
+sudo ss -ltnp | grep 8766
+```
+Si el segundo comando **no imprime nada**, el puerto quedó libre — avísame y
+arranco la instancia de prueba. Si imprime algo, pégame la salida antes de seguir
+(no continuar sin confirmar esto).
+
+**Al terminar — reiniciar el servicio real (después de que yo confirme que la
+instancia de prueba ya se detuvo):**
+```bash
+sudo systemctl start cva-gesture-bridge.service
+sudo systemctl status cva-gesture-bridge.service --no-pager
+sudo ss -ltnp | grep 8766
+```
+El `status` debe decir `active (running)`, y el `ss` debe mostrar el PID del
+proceso real (el que corre desde
+`/home/david_cardenas/video_analitica/rasperry_pi-de-video-analitica/.venv/bin/python`,
+no desde el worktree de prueba). Pégame las tres salidas — las reviso contra el
+sistema real antes de dar la fase por cerrada (ver "Paso 3" más abajo), no me
+conformo con que los comandos se hayan corrido.
+
+### 2. Cómo arranco la instancia de prueba
+
+```bash
+cd ~/video_analitica/cva-pi-repo-fase-c2-fix
+CVA_LOG_FILE=benchmarks/fase_d_run_<condicion>.log \
+  .venv-fase-c2-fix/bin/python -m cva_gesture_bridge.main
+```
+En segundo plano, guardando el PID. El archivo de log usa el formato ya existente
+del proyecto (`%(asctime)s %(levelname)s %(name)s: %(message)s`,
+`logging_setup.py`) — milisegundos por línea, sin cambios de código para esta
+fase.
+
+**Para detenerla limpio:** `kill -INT <pid>` (SIGINT, el mismo que Ctrl+C) — el
+`except KeyboardInterrupt` ya existente en `main.py` loguea
+"cva_gesture_bridge detenido por el usuario" y cierra ordenado. Confirmo que el
+proceso ya no existe (`ps -p <pid>`) antes de pedirle a JD que reinicie el
+servicio real.
+
+**Capturador temporal (opcional, para documentar casos difíciles sin tener que
+describirlos de memoria):** si hace falta, se activa con
+`CVA_CAPTURE_FRAMES_DIR=benchmarks/fase_d_frames_<condicion>` al arrancar — mismo
+mecanismo ya usado en Fase A/recaptura de meñique, gitignorado, nunca fotos reales
+al repo.
+
+### 3. Guion de medición con verdad conocida
+
+`benchmarks/fase_d_schedule.py` (ya escrito, no se importa desde el paquete) —
+imprime, con el reloj de la Pi (mismo formato de timestamp que el log del bridge,
+para poder cruzar las dos fuentes sin depender de sincronización entre máquinas),
+cuándo hacer cada gesto y cuándo quitar la mano. JD lo corre en una terminal SSH
+**aparte** de la que usa su cliente real, y sigue las señales en tiempo real
+mientras opera el cliente normalmente (la práctica real, por el túnel SSH, como
+siempre).
+
+- 4 gestos del catálogo × 10 repeticiones cada uno = 40 repeticiones, en bloques
+  (10 seguidas del mismo gesto, no intercaladas — más simple de analizar).
+- 3s sosteniendo cada gesto, 4s con la mano fuera de cuadro entre cada repetición
+  (margen real sobre `GESTURE_RELEASE_AFTER_MISSES_NO_HAND=16` ≈ 2.3s, más margen
+  de reacción humana para sacar la mano).
+- Duración de una batería completa: ~40 × (3+4)s ≈ 4.7 min, más los 10s de cuenta
+  regresiva inicial.
+
+### 4. Qué se mide, con advertencia de método
+
+Dos tiempos distintos, reportados **por separado** — no promediados entre sí:
+
+- **Tiempo de sistema** (lo que de verdad evalúa AC3 <1.5s): desde el primer frame
+  crudo donde el gesto ya es geométricamente el correcto (primera línea `[diag]
+  Gesto candidato: <gesto correcto>` en el log, sin importar si confirmó o no)
+  hasta la línea `Gesto detectado` confirmada. Esto mide el pipeline
+  (MediaPipe + GestureStabilizer), no la reacción humana.
+- **Tiempo total desde la señal**: desde el timestamp de la línea `CUE: HAZ: X` del
+  guion hasta `Gesto detectado`. Incluye el tiempo que JD tarda en reaccionar y
+  mover la mano a posición — **no mide el sistema**, se reporta aparte y nunca se
+  usa para evaluar AC3, para no mezclar reacción humana con rendimiento real.
+
+Además, por repetición y en agregado:
+- % de aciertos: gesto correcto confirmado **sin** haber mandado antes un gesto
+  equivocado en esa misma repetición (una repetición donde se manda el gesto
+  correcto pero precedido de un envío incorrecto NO cuenta como acierto limpio).
+- Líneas enviadas por repetición (esperado: 1 línea de gesto + 1 `gesto: ninguno`
+  al quitar la mano — más de eso es señal de un problema real, no de ruido
+  esperado, dado el fix de Fase C2).
+- Tiempo hasta `gesto: ninguno` tras retirar la mano (debería rondar el valor real
+  medido para `GESTURE_RELEASE_AFTER_MISSES_NO_HAND`, ~2.3s, más el margen que
+  tome MediaPipe en reportar "sin mano" de verdad).
+- Cero líneas durante los tramos de "mano fuera de cuadro" (aparte de la única
+  `gesto: ninguno` esperada al principio de cada tramo).
+
+### 5. Condiciones
+
+- **3 distancias**, medidas con cinta métrica y anotadas en cm exactos antes de
+  empezar cada batería: cerca, media, lejos (JD define los valores concretos al
+  momento, documentados en el reporte final, no fijados de antemano a ciegas).
+- **Segunda persona, de tono de piel distinto, si JD consigue una** — misma
+  batería completa. **Si no la consigue, se documenta explícitamente como brecha
+  abierta** en el reporte final (no se cierra en silencio ni se asume cubierta).
+
+### 6. Casos difíciles — resultado esperado definido ANTES de probar
+
+| caso | resultado esperado |
+|---|---|
+| Movimiento rápido (cambiar de gesto rápido, sin sostener) | No debe confirmarse ningún gesto incorrecto — puede no confirmar nada (aceptable), pero cero envíos equivocados. |
+| Mano tapada a medias | Puede no confirmar el gesto real (aceptable) — pero cero envíos de un gesto distinto al que se intenta. |
+| Mano en el borde del cuadro | Igual que arriba: aceptable no confirmar, inaceptable confirmar algo incorrecto. |
+| Dos manos en cuadro | El detector usa `num_hands=1` (detector.py) — debe seguir tratando una sola mano sin crashear; se documenta cuál de las dos eligió MediaPipe, sin asumir que es un bug si elige la "equivocada" (no hay forma de indicarle cuál priorizar en esta fase). |
+| Una persona pasando detrás | Cero gestos confirmados por la persona de fondo — mismo criterio que los fixtures de cara/torso de Fase B (geométricamente no debe calzar con ningún patrón del catálogo). |
+
+### 7. Qué hace JD y cuánto dura cada bloque
+
+1. **Preparación** (~2 min): correr los 2 comandos de "detener servicio" de la
+   sección 1, confirmar puerto libre, avisarme.
+2. **Batería principal** (~5 min × 3 distancias ≈ 15 min): por cada distancia,
+   JD corre `fase_d_schedule.py <distancia>` en una terminal SSH aparte, sigue las
+   señales con su cliente real abierto y operando normalmente.
+3. **Segunda persona** (~15 min adicionales, si aplica): misma batería completa.
+4. **Casos difíciles** (~5-10 min): JD improvisa cada caso de la tabla de arriba
+   cuando se lo pida, sin guion cronometrado (son puntuales, no repeticiones).
+5. **Cierre** (~2 min, checklist):
+   - [ ] Confirmo que mi instancia de prueba ya no tiene proceso corriendo.
+   - [ ] JD corre los 3 comandos de "reiniciar servicio" de la sección 1.
+   - [ ] Reviso las 3 salidas contra el sistema real (PID, puerto, estado) antes
+         de dar la fase por cerrada.
+
+### Pendiente de aprobación
+
+Este plan está escrito, no ejecutado. Falta la aprobación explícita de JD sobre
+este documento antes de pasar al Paso 2 (ejecutar con JD, analizar, documentar
+resultados reales con tabla por condición).
