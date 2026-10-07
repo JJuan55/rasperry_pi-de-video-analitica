@@ -28,7 +28,10 @@ REPEATS_PER_GESTURE = 10
 HOLD_SECONDS = 3
 # Margen real sobre GESTURE_RELEASE_AFTER_MISSES_NO_HAND=16 (~16*143ms=2.3s, ver
 # BITACORA.md "Fase C2") + margen de reacción humana para sacar la mano del cuadro.
-GAP_SECONDS = 4
+# Subido a 5s (revisión del plan, 2026-10) -- 4s dejaba poco margen sobre los
+# 2.3s teóricos antes de empezar a mover la mano de vuelta para la repetición
+# siguiente.
+GAP_SECONDS = 5
 COUNTDOWN_SECONDS = 10
 
 
@@ -37,7 +40,7 @@ def _now() -> str:
 
 
 def _announce(msg: str) -> None:
-    print(f"{_now()} CUE: {msg}", flush=True)
+    print(f"\a{_now()} CUE: {msg}", flush=True)  # \a: pitido audible en cada señal
 
 
 def main() -> None:

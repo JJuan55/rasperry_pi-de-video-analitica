@@ -1807,7 +1807,7 @@ antes de esta corrección: 69).
   no la agresiva que se había planteado al principio — una señal mejor que "cuadros
   seguidos sin mano cruda" podría ajustarlo más en el futuro, con datos.
 
-## Fase D — plan de medición end-to-end contra AC3 (2026-10, PASO 1: sin ejecutar todavía)
+## Fase D — plan de medición end-to-end contra AC3 (2026-10, PASO 1: revisado, sin ejecutar la medición todavía)
 
 Revisión externa de `fd3a288` (rama `fase-c2-fix-confirmed-output`): corrección
 aprobada, 78 tests confirmados. JD autorizó Fase D por el **camino A**: el cliente
@@ -1818,6 +1818,10 @@ puerto, mientras dure la medición.
 
 **Esto es el plan, todavía NO ejecutado.** Documentado acá primero para revisión de
 JD antes de tocar el servicio real, por pedido explícito.
+
+**Revisión del plan (2026-10, después del commit `a77fadb`):** aprobado CON
+CAMBIOS. Los puntos 1-8 de abajo son los cambios pedidos, ya aplicados en este
+commit — **la medición en sí (Paso 2) sigue sin ejecutarse.**
 
 ### Reglas fijas de esta fase
 
@@ -1832,6 +1836,10 @@ JD antes de tocar el servicio real, por pedido explícito.
 3. Si aparece un defecto durante la medición, no se arregla en silencio — se
    reporta primero, y el arreglo (si corresponde) va en un commit aparte con su
    propio test, no mezclado con los datos de la medición.
+4. **Git, aclarado en la revisión del plan:** cualquier push de este trabajo va
+   únicamente a `origin/fase-c2-fix-confirmed-output` — nunca a `main` ni a
+   ninguna otra rama directamente desde acá. Fusionar a `main` (si corresponde,
+   cuando Fase D cierre) es un PR aparte, decisión de JD, igual que con Fase C2.
 
 ### 1. Comandos exactos para JD (copiables, sin interpretación)
 
@@ -1843,6 +1851,13 @@ sudo ss -ltnp | grep 8766
 Si el segundo comando **no imprime nada**, el puerto quedó libre — avísame y
 arranco la instancia de prueba. Si imprime algo, pégame la salida antes de seguir
 (no continuar sin confirmar esto).
+
+**Importante — orden de arranque del cliente:** JD abre su cliente real (el que se
+conecta por el túnel SSH a 8766) recién **DESPUÉS** de que yo confirme que la
+instancia de prueba ya está escuchando en 8766 (lo verifico con `ss`, igual que en
+el ensayo en seco de abajo). Abrirlo antes arriesga que el cliente haga su chequeo
+de salud (sección 4.2 de `CLAUDE.md`) contra un puerto todavía cerrado y falle la
+conexión.
 
 **Al terminar — reiniciar el servicio real (después de que yo confirme que la
 instancia de prueba ya se detuvo):**
@@ -1857,6 +1872,19 @@ proceso real (el que corre desde
 no desde el worktree de prueba). Pégame las tres salidas — las reviso contra el
 sistema real antes de dar la fase por cerrada (ver "Paso 3" más abajo), no me
 conformo con que los comandos se hayan corrido.
+
+**Plan de reversa, si algo de esto no sale limpio:**
+- Si `systemctl status` **no** dice `active (running)` después del `start`: JD
+  pega la salida completa de
+  ```bash
+  sudo journalctl -u cva-gesture-bridge -n 40 --no-pager
+  ```
+  para diagnosticar antes de reintentar nada a ciegas.
+- Si la instancia de prueba **no** cierra con `kill -INT <pid>` (SIGINT) en unos
+  segundos: forzar con `kill -KILL <pid>` (SIGKILL) y confirmar igual con
+  `ps -p <pid>` que ya no existe antes de pedirle a JD que reinicie el servicio
+  real — nunca dejar que el real arranque mientras la de prueba todavía podría
+  tener el puerto tomado.
 
 ### 2. Cómo arranco la instancia de prueba
 
@@ -1882,6 +1910,35 @@ describirlos de memoria):** si hace falta, se activa con
 mecanismo ya usado en Fase A/recaptura de meñique, gitignorado, nunca fotos reales
 al repo.
 
+**Ensayo en seco (corrido antes de pedirle nada a JD, puerto 8767 -- no toca
+producción ni el puerto real):**
+```
+$ CVA_BRIDGE_PORT=8767 CVA_LOG_FILE=benchmarks/fase_d_dry_run.log \
+    .venv-fase-c2-fix/bin/python -m cva_gesture_bridge.main &
+PID: 877256
+
+$ ss -ltnp | grep 8767
+LISTEN 0 100 0.0.0.0:8767 0.0.0.0:* users:(("python",pid=877256,fd=13))
+
+$ cat benchmarks/fase_d_dry_run.log
+2026-10-07 16:48:33,285 INFO __main__: Detector de gestos precalentado (warmup de arranque)
+2026-10-07 16:48:33,286 INFO cva_gesture_bridge.transport.tcp_server: cva_gesture_bridge escuchando en ('0.0.0.0', 8767)
+
+$ kill -INT 877256
+$ cat benchmarks/fase_d_dry_run.log   # línea nueva tras el SIGINT
+2026-10-07 16:48:42,234 INFO __main__: cva_gesture_bridge detenido por el usuario
+
+$ ps -p 877256
+    PID CMD        # (vacío -- confirmado, el proceso ya no existe)
+
+$ ss -ltnp | grep 8767   # (vacío -- puerto liberado)
+```
+Modelo cargado correctamente (`models/hand_landmarker.task` ya estaba en este
+worktree, copiado al armarlo en Fase B — no hizo falta copiarlo de nuevo ni
+versionarlo), warmup confirmado, cierre con SIGINT limpio y verificado contra el
+sistema real (`ps`, `ss`), no solo asumido. Log de este ensayo descartado después
+(gitignorado, `benchmarks/*.log`).
+
 ### 3. Guion de medición con verdad conocida
 
 `benchmarks/fase_d_schedule.py` (ya escrito, no se importa desde el paquete) —
@@ -1894,27 +1951,47 @@ siempre).
 
 - 4 gestos del catálogo × 10 repeticiones cada uno = 40 repeticiones, en bloques
   (10 seguidas del mismo gesto, no intercaladas — más simple de analizar).
-- 3s sosteniendo cada gesto, 4s con la mano fuera de cuadro entre cada repetición
-  (margen real sobre `GESTURE_RELEASE_AFTER_MISSES_NO_HAND=16` ≈ 2.3s, más margen
-  de reacción humana para sacar la mano).
-- Duración de una batería completa: ~40 × (3+4)s ≈ 4.7 min, más los 10s de cuenta
-  regresiva inicial.
+- 3s sosteniendo cada gesto, **5s** con la mano fuera de cuadro entre cada
+  repetición (subido de 4s a 5s en la revisión del plan — margen real sobre
+  `GESTURE_RELEASE_AFTER_MISSES_NO_HAND=16` ≈ 2.3s, más margen de reacción humana
+  para sacar la mano Y volver a prepararla para la siguiente repetición).
+- Cada señal (`CUE:`) va precedida de un pitido audible (`\a`) además del texto —
+  más fácil de seguir sin tener que estar mirando la pantalla todo el tiempo.
+- Duración de una batería completa: ~40 × (3+5)s = 320s ≈ 5.3 min, más los 10s de
+  cuenta regresiva inicial.
 
 ### 4. Qué se mide, con advertencia de método
 
 Dos tiempos distintos, reportados **por separado** — no promediados entre sí:
 
-- **Tiempo de sistema** (lo que de verdad evalúa AC3 <1.5s): desde el primer frame
-  crudo donde el gesto ya es geométricamente el correcto (primera línea `[diag]
-  Gesto candidato: <gesto correcto>` en el log, sin importar si confirmó o no)
-  hasta la línea `Gesto detectado` confirmada. Esto mide el pipeline
-  (MediaPipe + GestureStabilizer), no la reacción humana.
+- **Tiempo de sistema** (lo que de verdad evalúa AC3 <1.5s): desde el **inicio de
+  la racha continua** de líneas `[diag] Gesto candidato: <gesto correcto>` que
+  termina en la confirmación — **no** desde la primera línea suelta con ese gesto
+  si hubo una aislada más atrás seguida de ruido (corrección del plan, 2026-10: una
+  coincidencia temprana aislada que no formó parte de la racha que realmente
+  confirmó exageraría el tiempo medido, o lo subestimaría si se ignora que hubo
+  ruido en el medio — la racha continua que efectivamente llevó a la confirmación
+  es la que importa). Hasta la línea `Gesto detectado` confirmada. Esto mide el
+  pipeline (MediaPipe + GestureStabilizer), no la reacción humana.
 - **Tiempo total desde la señal**: desde el timestamp de la línea `CUE: HAZ: X` del
   guion hasta `Gesto detectado`. Incluye el tiempo que JD tarda en reaccionar y
   mover la mano a posición — **no mide el sistema**, se reporta aparte y nunca se
   usa para evaluar AC3, para no mezclar reacción humana con rendimiento real.
 
-Además, por repetición y en agregado:
+**Regla de análisis — repeticiones CONTAMINADAS (agregada en la revisión del
+plan):** el bridge manda una línea de gesto solo cuando `confirmed_gesture`
+*cambia* respecto al último valor mandado (fix de Fase C2, ver esa sección de esta
+misma bitácora). Eso significa que si la liberación (`gesto: ninguno`) de la
+repetición anterior no llegó a tiempo o no llegó por algún motivo, la repetición
+siguiente del MISMO gesto puede confirmar correctamente por dentro sin generar
+ninguna línea nueva (porque ya "coincide" con lo último mandado) — verla sin línea
+de gesto no significa que el sistema falló en detectarla. **Toda repetición cuyo
+log no tenga un `gesto: ninguno` INMEDIATAMENTE ANTES de su tramo de `HAZ:` se
+marca CONTAMINADA y se excluye del % de aciertos** (no cuenta como acierto ni como
+fallo — queda fuera de la muestra, reportada aparte). Al analizar, reportar
+explícitamente cuántas repeticiones quedaron contaminadas por condición.
+
+Además, por repetición y en agregado (sobre las repeticiones NO contaminadas):
 - % de aciertos: gesto correcto confirmado **sin** haber mandado antes un gesto
   equivocado en esa misma repetición (una repetición donde se manda el gesto
   correcto pero precedido de un envío incorrecto NO cuenta como acierto limpio).
@@ -1961,6 +2038,24 @@ Además, por repetición y en agregado:
    - [ ] JD corre los 3 comandos de "reiniciar servicio" de la sección 1.
    - [ ] Reviso las 3 salidas contra el sistema real (PID, puerto, estado) antes
          de dar la fase por cerrada.
+
+### Limitaciones de esta medición (agregado en la revisión del plan)
+
+- **La medición llega solo hasta el envío desde la Pi** — mide desde que el frame
+  entra al detector hasta que `TcpServer.send_line` escribe en el socket. **No
+  incluye** el tiempo de red del túnel SSH hasta la máquina de JD, ni el tiempo
+  que tarda el cliente en leer la línea y pintarla en pantalla. El AC3 real
+  "de punta a punta, visible para el estudiante" es por lo tanto siempre
+  **mayor o igual** al tiempo de sistema medido acá, nunca menor.
+- **`Gesto detectado` en el log es un proxy de "línea enviada", no una garantía.**
+  Caso borde real (ver `main.py`): el log "Gesto detectado" se escribe apenas el
+  `GestureStabilizer` confirma, ANTES de chequear si `confirmed_confidence` supera
+  `MIN_CONFIDENCE` — si no la supera, `format_line` devuelve `None` y nunca se
+  llama a `send_line`, aunque el log ya haya dicho "Gesto detectado". Con los
+  datos reales medidos hasta ahora las confianzas rondan 0.9-1.0 y `MIN_CONFIDENCE`
+  es 0.5 (margen amplio, este caso no se ha visto en la práctica) — pero si al
+  analizar aparece un "Gesto detectado" sin la línea `gesto: X` correspondiente
+  en el tráfico real, es este caso borde, no un bug nuevo.
 
 ### Pendiente de aprobación
 
