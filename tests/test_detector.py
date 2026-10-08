@@ -47,6 +47,7 @@ from cva_gesture_bridge.vision.detector import (
     classify_world_landmarks,
     extended_fingers_pattern,
     format_line,
+    _stub_sounddevice_if_unavailable,
 )
 
 # --- Landmarks de mundo sintéticos ------------------------------------------------
@@ -574,3 +575,56 @@ def test_sustained_real_gesture_confirms_through_the_full_pipeline(fresh_detecto
     jpeg = _read_fixture("fixture_puno_cerrado.jpg")
     results = [stabilizer.observe(fresh_detector.detect(jpeg).gesture) for _ in range(10)]
     assert results[-1] == GESTURE_PUÑO_CERRADO
+
+
+# --- Incidente real de Fase D: mediapipe importa su submódulo de audio sin que
+# este proyecto lo use nunca, y ese submódulo intenta inicializar PortAudio en el
+# momento del import -- revienta en el servicio real (unidad de sistema de
+# systemd, sin sesión de audio) aunque funcionara en pruebas interactivas por SSH.
+# Ver BITACORA.md "Fase D" y el docstring de _stub_sounddevice_if_unavailable. ---
+
+
+def test_stub_sounddevice_installed_when_real_import_fails(monkeypatch):
+    import builtins
+    import sys
+
+    monkeypatch.delitem(sys.modules, "sounddevice", raising=False)
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "sounddevice":
+            raise OSError("simulado: sin PulseAudio/PortAudio disponible")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+
+    _stub_sounddevice_if_unavailable()
+
+    assert "sounddevice" in sys.modules
+    # Un stub en blanco (types.ModuleType) nunca tiene __file__ -- el paquete real sí.
+    assert not hasattr(sys.modules["sounddevice"], "__file__")
+
+
+def test_stub_not_installed_when_real_sounddevice_import_succeeds(monkeypatch):
+    import sys
+
+    monkeypatch.delitem(sys.modules, "sounddevice", raising=False)
+
+    _stub_sounddevice_if_unavailable()
+
+    # En esta máquina/entorno de test sounddevice sí se puede importar de
+    # verdad -- la función no debe pisarlo con un stub (eso ocultaría un fallo
+    # real de audio en los entornos donde sí hay sesión disponible).
+    assert "sounddevice" in sys.modules
+    assert hasattr(sys.modules["sounddevice"], "__file__")
+
+
+def test_stub_does_not_touch_an_already_imported_sounddevice(monkeypatch):
+    import sys
+
+    sentinel = object()
+    monkeypatch.setitem(sys.modules, "sounddevice", sentinel)
+
+    _stub_sounddevice_if_unavailable()
+
+    assert sys.modules["sounddevice"] is sentinel

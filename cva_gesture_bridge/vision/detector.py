@@ -33,7 +33,9 @@ puño_cerrado, palma_abierta, dedo_pulgar, dedo_menique.
 
 import logging
 import math
+import sys
 import time
+import types
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
@@ -309,6 +311,33 @@ Fase 9, cuando ejecute instrucciones reales) sepan que el gesto sostenido termin
 en vez de inferirlo por la ausencia de nuevas líneas."""
 
 
+def _stub_sounddevice_if_unavailable() -> None:
+    """Incidente real de Fase D (ver BITACORA.md "Fase D", corrección de
+    despliegue): `mediapipe==1.0.1` importa, SIEMPRE y sin excepción,
+    `mediapipe.tasks.python.audio` al cargar `mediapipe.tasks.python` (este
+    proyecto solo usa `vision.HandLandmarker`, nunca audio) — y ese submódulo
+    importa `sounddevice`, que intenta inicializar PortAudio/PulseAudio en el
+    momento mismo del import, no de forma perezosa. En una sesión interactiva por
+    SSH esto pasa desapercibido porque suele haber una sesión de PulseAudio de
+    usuario alcanzable; en el servicio real (`cva-gesture-bridge.service`, unidad
+    de *sistema* de systemd, sin sesión de audio de ningún usuario) esto hace que
+    el proceso completo crashee en bucle al arrancar
+    (`sounddevice.PortAudioError: ... Can't connect to server`), aunque el
+    detector nunca use audio para nada.
+
+    Si `sounddevice` ya se puede importar de verdad (típico en una sesión
+    interactiva), no se hace nada -- esto NO oculta un error real de audio en los
+    casos donde sí hay sesión disponible, un stub en blanco solo se instala
+    cuando la importación real falla."""
+    if "sounddevice" in sys.modules:
+        return
+    try:
+        import sounddevice  # noqa: F401
+    except Exception:
+        stub = types.ModuleType("sounddevice")
+        sys.modules["sounddevice"] = stub
+
+
 class GestureDetector:
     """Detector real de gestos sobre frames JPEG crudos — Fase B (MediaPipe)."""
 
@@ -322,6 +351,7 @@ class GestureDetector:
     ) -> None:
         # Import perezoso: mediapipe es pesado, no hace falta para importar el módulo
         # (los tests de geometría pura no lo necesitan).
+        _stub_sounddevice_if_unavailable()
         import mediapipe as mp
         from mediapipe.tasks import python as mp_python
         from mediapipe.tasks.python import vision as mp_vision

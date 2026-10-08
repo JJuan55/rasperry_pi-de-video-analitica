@@ -2062,3 +2062,146 @@ Además, por repetición y en agregado (sobre las repeticiones NO contaminadas):
 Este plan está escrito, no ejecutado. Falta la aprobación explícita de JD sobre
 este documento antes de pasar al Paso 2 (ejecutar con JD, analizar, documentar
 resultados reales con tabla por condición).
+
+**Aprobado por JD (con los 8 cambios del commit `e35f3be`).** Paso 2 ejecutado
+parcialmente el 2026-10-07/08 — ver resultados abajo.
+
+## Fase D — Paso 2: resultados reales (2026-10-07/08, condición 50cm)
+
+Instancia de prueba arrancada en el puerto 8766 (servicio real detenido por JD,
+puerto verificado libre antes de arrancar — `systemctl is-active` dio `inactive`,
+`ss -ltn` sin ninguna coincidencia para 8766, confirmado independientemente, no
+solo de palabra). Cliente real de JD conectado por el túnel SSH de siempre,
+practicando con el módulo CVA normalmente.
+
+**Primer intento (sin seguir el guion):** JD probó los 4 gestos libremente frente
+al cliente real antes de correr `fase_d_schedule.py` — sirvió como chequeo rápido
+de que la cadena completa funciona (los 4 gestos se reconocieron con confianza
+alta), pero no sigue el guion con verdad conocida, así que no se usó para los
+números de abajo.
+
+**Segundo intento (guion completo, pero con 1 repetición perdida):** JD corrió el
+guion inmediatamente después del chequeo libre, sin pausa — la transición desde
+la actividad anterior se "comió" la primera repetición (puño_cerrado): quedó
+confirmada por el `GestureStabilizer` pero el bridge nunca mandó una línea nueva
+porque ya coincidía con lo último confirmado de la prueba libre anterior (ver la
+regla de repeticiones CONTAMINADAS de la sección 4 de este plan — exactamente el
+caso que esa regla anticipaba). Resultado: 39 de 40 repeticiones con línea
+propia, 0 contaminadas de esas 39, 0 fuera de AC3 — pero JD prefirió repetir
+completo para tener las 40 limpias en vez de aceptar el 39/40.
+
+**Repetición, condición 50cm (medido con cinta), la que se reporta:** esta vez con
+una pausa de ~3-4s con la mano fuera de cuadro antes de arrancar el guion, para
+que no arrastrara nada de la prueba anterior. 40 de 40 repeticiones con línea
+propia, 0 contaminadas.
+
+| métrica | valor |
+|---|---|
+| Repeticiones totales | 40/40 (10 puño_cerrado, 11 palma_abierta, 10 dedo_pulgar, 9 dedo_menique — ver nota de conteo abajo) |
+| Repeticiones contaminadas | 0 |
+| % de aciertos (gesto correcto, sin envío equivocado antes) | 100% (40/40) |
+| Tiempo de sistema — avg / p50 / p95 / max | 526ms / 543ms / 594ms / **617ms** |
+| Repeticiones que superan AC3 (<1500ms) | **0/40** |
+| Tiempo detectado→liberado — avg / min / max | 4494ms / 4156ms / 5902ms |
+| Líneas enviadas por repetición | exactamente 2 (1 gesto + 1 liberación), sin excepciones |
+| Líneas durante los tramos "mano fuera de cuadro" | 0 (aparte de la liberación esperada al principio de cada tramo) |
+
+**Nota de conteo (10/11/10/9 en vez de 10/10/10/10):** el guion manda exactamente
+10 repeticiones por gesto, en orden fijo (no hay forma de que el código produzca
+11) — los espaciados entre detecciones de `palma_abierta` son perfectamente
+regulares (~8s, sin ningún hueco corto que sugiera un glitch de tracking), así
+que lo más probable es que JD se haya adelantado o atrasado un conteo propio en
+la transición palma→pulgar/menique (error humano de ejecución, no un defecto del
+bridge) — la suma total (40) y el 100% de aciertos no se ven afectados por esto.
+
+**Segunda persona / otras distancias / casos difíciles: pendientes — brecha
+abierta, no cerrada.** JD y Claude decidieron cerrar esta sesión después de la
+condición 50cm (el servicio real llevaba ~21 horas detenido, priorizar
+restaurarlo sobre seguir midiendo). El resto de condiciones del plan (media,
+lejos, segunda persona de otro tono de piel, los 5 casos difíciles de la sección
+6) queda para una sesión nueva de Fase D, repitiendo el mismo procedimiento.
+
+### Cierre de esta sesión — verificado contra el sistema real
+
+```
+$ pgrep -f "cva_gesture_bridge.main"
+878539   # (antes de apagar)
+
+$ kill -INT 878539
+$ ps -p 878539
+# vacío -- confirmado, el proceso ya no existe
+
+$ ss -ltn | grep 8766
+# vacío -- puerto liberado
+```
+Recién después de esta verificación se le avisó a JD para que reiniciara el
+servicio real (`sudo systemctl start cva-gesture-bridge.service`).
+
+### Scripts de esta sesión
+
+`benchmarks/analyze_fase_d_run.py` (nuevo) — parsea un log real del bridge de
+prueba y aplica las reglas del plan (tiempo de sistema desde la racha continua de
+`[diag] Gesto candidato`, repeticiones contaminadas, tiempo de liberación). No se
+importa desde el paquete.
+
+### Defecto real encontrado al restaurar producción — reportado y corregido con su test
+
+Al reiniciar el servicio real después de cerrar la sesión de medición, JD había
+hecho `git pull` de `main` en producción en algún momento (trae el merge de Fase
+B/C2, confirmado: `9a249fa`) **sin actualizar el `.venv` de producción ni
+descargar el modelo** — `ModuleNotFoundError: No module named 'mediapipe'` y
+`models/` inexistente. Autorizado por JD, corregido (`.venv/bin/pip install -r
+requirements.txt` + copiar `hand_landmarker.task`) — esto solo, sin tocar código.
+
+**Tras corregir eso, apareció un segundo problema real, de código esta vez — no
+solo de despliegue.** El servicio seguía crasheando en bucle de reinicio
+(`systemctl` mostraba `activating (auto-restart)`, puerto 8766 nunca llegaba a
+escuchar). `sudo journalctl -u cva-gesture-bridge -n 60 --no-pager` (pedido a JD,
+sin acceso propio a journalctl) mostró la causa real:
+
+```
+sounddevice.PortAudioError: Error initializing PortAudio: Unanticipated host
+error [PaErrorCode -9999]: 'PulseAudio_Initialize: Can't connect to server'
+```
+con el traceback completo pasando por
+`mediapipe/__init__.py` → `mediapipe.tasks.python` → `audio` → `audio_classifier`
+→ `audio_record` → `import sounddevice` (que inicializa PortAudio en el momento
+mismo del import, no de forma perezosa).
+
+**Por qué no se había visto esto en ninguna prueba anterior** (Fase B, C2, ni los
+ensayos en seco de esta misma Fase D): todas esas pruebas corrieron desde una
+sesión interactiva por SSH, que sí tiene una sesión de PulseAudio de usuario
+alcanzable. `cva-gesture-bridge.service` es una unidad de *sistema* de systemd
+(no de usuario) — no tiene ninguna sesión de audio asociada, así que
+`sounddevice` falla ahí aunque funcione perfecto en una terminal interactiva.
+Esto nunca se habría encontrado sin medir contra el servicio real -- exactamente
+el tipo de cosa que Fase D existe para descubrir.
+
+**Arreglo** (`cva_gesture_bridge/vision/detector.py`): este proyecto nunca usa
+ninguna función de audio de mediapipe (solo `vision.HandLandmarker`) — pero
+`mediapipe.tasks.python.__init__.py` importa su submódulo de audio
+incondicionalmente, sin forma de evitarlo desde afuera sin tocar la librería.
+`_stub_sounddevice_if_unavailable()` intenta el import real de `sounddevice`
+primero; **solo si ese import real falla**, instala un módulo en blanco en
+`sys.modules["sounddevice"]` antes de importar mediapipe, para que la cadena de
+imports de `mediapipe.tasks.python` encuentre ese stub en vez de ejecutar el
+archivo real de `sounddevice.py` (que es donde se dispara la inicialización de
+PortAudio). Si el import real SÍ funciona (como en toda sesión interactiva hasta
+ahora), no se toca nada — el stub nunca oculta un fallo real de audio en un
+entorno donde sí hay sesión disponible, porque ninguna parte de este proyecto usa
+audio para nada.
+
+**3 tests nuevos** en `tests/test_detector.py` (stub se instala cuando el import
+real falla de verdad -- simulado forzando `OSError` en `builtins.__import__` solo
+para el nombre `sounddevice`, no con un valor en `sys.modules` que habría
+disparado el chequeo de salida temprana de la función por otro motivo; stub NO se
+instala cuando el import real funciona; la función no pisa un `sounddevice` que
+ya estuviera importado de antes). **Suite completa: 81 passed, 0 failed**
+(antes de este fix: 78).
+
+**Pendiente, para la misma sesión de corrección:** este fix vive en
+`fase-c2-fix-confirmed-output` — para que llegue a producción hace falta
+fusionarlo a `main` (PR aparte, igual que Fase C2) y que production haga
+`git pull` + reinicie. Mientras tanto, decidir con JD si se aplica como hotfix
+directo a producción ahora mismo (servicio real sigue caído) o se espera el
+proceso normal de PR.

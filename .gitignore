@@ -45,6 +45,7 @@ logs/
 
 # ── Fase D: logs de corridas de prueba (runtime, no versionar -- ver BITACORA.md) ──
 benchmarks/*.log
+benchmarks/*.log.*
 benchmarks/fase_d_frames_*/
 
 # ── Segundo cerebro — Graphify/Obsidian (tooling de desarrollo local, nunca al repo) ──
