@@ -22,9 +22,19 @@ Corrección (revisión externa, 2026-10): la primera versión de este script NO
 guardaba ningún archivo, solo imprimía a pantalla -- la corrida de 50cm de esta
 fase no pudo verificar tiempos contra la señal real del guion por esto (ver
 BITACORA.md "Fase D", nota de método). Ahora SIEMPRE guarda las señales en
-`benchmarks/fase_d_cue_<condicion>.log`, con el mismo formato de timestamp que
-usa este script en pantalla (y que coincide con el formato del log del bridge),
-para que `analyze_fase_d_run.py` pueda cruzar ambos archivos de ahora en más.
+`benchmarks/fase_d_cue_<condicion>_<fecha_hora>.log`, con el mismo formato de
+timestamp que usa este script en pantalla (y que coincide con el formato del
+log del bridge), para que `analyze_fase_d_run.py` pueda cruzar ambos archivos
+de ahora en más.
+
+Segunda corrección (misma revisión): la primera versión de este fix abría el
+archivo en modo "a" (append) -- dos corridas de la MISMA condición (ej. repetir
+"50cm" porque la primera salió mal, como pasó en esta fase) se mezclaban en el
+mismo archivo, con dos guiones completos intercalados en los mismos números de
+repetición. El nombre de archivo ahora incluye fecha y hora de arranque (hasta
+el segundo), así que cada corrida -- misma condición o no -- cae en su propio
+archivo nuevo, sin necesidad de "w" con aviso de sobreescritura ni de que quien
+corre el script se acuerde de nada.
 """
 
 import os
@@ -63,9 +73,10 @@ def main() -> None:
     total = len(GESTURES) * REPEATS_PER_GESTURE
 
     here = os.path.dirname(os.path.abspath(__file__))
-    log_path = os.path.join(here, f"fase_d_cue_{condicion}.log")
+    start_stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_path = os.path.join(here, f"fase_d_cue_{condicion}_{start_stamp}.log")
 
-    with open(log_path, "a", encoding="utf-8") as log_file:
+    with open(log_path, "x", encoding="utf-8") as log_file:
         announce = _make_announce(log_file)
 
         print(f"=== Guion de Fase D -- condición: {condicion} ===")

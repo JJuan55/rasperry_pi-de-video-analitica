@@ -1964,15 +1964,28 @@ siempre).
 
 Dos tiempos distintos, reportados **por separado** — no promediados entre sí:
 
-- **Tiempo de sistema** (lo que de verdad evalúa AC3 <1.5s): desde el **inicio de
-  la racha continua** de líneas `[diag] Gesto candidato: <gesto correcto>` que
-  termina en la confirmación — **no** desde la primera línea suelta con ese gesto
-  si hubo una aislada más atrás seguida de ruido (corrección del plan, 2026-10: una
-  coincidencia temprana aislada que no formó parte de la racha que realmente
-  confirmó exageraría el tiempo medido, o lo subestimaría si se ignora que hubo
-  ruido en el medio — la racha continua que efectivamente llevó a la confirmación
-  es la que importa). Hasta la línea `Gesto detectado` confirmada. Esto mide el
-  pipeline (MediaPipe + GestureStabilizer), no la reacción humana.
+- **Tiempo de sistema** (lo que de verdad evalúa AC3 <1.5s) — **corregido dos
+  veces, ver nota abajo**: se reproduce el `GestureStabilizer` real (se importa
+  la clase tal cual, no se reimplementa su lógica aparte) sobre la secuencia
+  cruda completa de observaciones (`[diag] Gesto candidato`/`[diag] Sin gesto
+  reconocido`, en orden, incluyendo `None`). En el momento exacto en que el
+  stabilizer real confirma, el tiempo de sistema es la distancia entre esa
+  confirmación y la observación MÁS ANTIGUA dentro de las últimas `window_size`
+  (7) observaciones evaluadas -- la ventana real que el propio algoritmo usó
+  para confirmar, no una racha continua ni la primera coincidencia aislada.
+  Esto mide el pipeline (MediaPipe + GestureStabilizer), no la reacción humana.
+
+  **Nota de corrección (2026-10, revisión externa):** la primera versión de
+  esta definición (todavía en revisión, nunca llegó a reportarse como
+  definitiva) medía la racha CONTINUA de candidatos del gesto correcto. Error
+  real: `GestureStabilizer` confirma con 5 coincidencias de 7 y TOLERA frames
+  intercalados (no exige racha exacta) — una racha continua subestima el
+  tiempo real cada vez que hubo ruido intercalado antes de la coincidencia más
+  antigua de la ventana real. Se encontró un caso imposible en los datos (una
+  repetición midió 85ms, pero 5 frames a ~7fps necesitan como mínimo ~572ms
+  entre el primero y el último) que confirmó el error antes de reportar nada
+  como cerrado. Ver "Fase D — Paso 2" más abajo para los valores reales
+  recalculados con el algoritmo real reproducido.
 - **Tiempo total desde la señal**: desde el timestamp de la línea `CUE: HAZ: X` del
   guion hasta `Gesto detectado`. Incluye el tiempo que JD tarda en reaccionar y
   mover la mano a posición — **no mide el sistema**, se reporta aparte y nunca se
@@ -2107,7 +2120,7 @@ pudo verificar realmente:
 |---|---|---|
 | Repeticiones totales (eventos "Gesto detectado") | 40 | conteo directo del log |
 | Repeticiones contaminadas (regla de la sección 4) | 0 | `analyze_fase_d_run.py` |
-| Tiempo de sistema — avg / p50 / p95 / max | 526ms / 543ms / 594ms / **617ms** | `analyze_fase_d_run.py`, racha continua de `[diag] Gesto candidato` |
+| Tiempo de sistema — avg / p50 / p95 / max / min | 543ms / 543ms / 596ms / **763ms** / 417ms | `analyze_fase_d_run.py`, `GestureStabilizer` real reproducido (ver corrección de método, sección 4) |
 | Repeticiones que superan AC3 (<1500ms) | **0/40** | `analyze_fase_d_run.py` |
 | Tiempo detectado→liberado — avg / min / max | 4494ms / 4156ms / 5902ms | `analyze_fase_d_run.py` (desde la detección, NO desde la señal QUITA del guion — ver nota de método abajo) |
 | Secuencia de eventos | estrictamente alternada `detectado, liberado, detectado, liberado...` (80 eventos, 40 pares), sin excepciones | verificado por script aparte, pegado abajo |
@@ -2128,54 +2141,63 @@ longitud: 80
 alterna estrictamente D,L,D,L...: True
 ```
 
-**Tabla "Detalle por repetición" completa (las 40), salida real de `analyze_fase_d_run.py`:**
+**Tabla "Detalle por repetición" completa (las 40), salida real de
+`analyze_fase_d_run.py` con el `GestureStabilizer` real reproducido (corregido
+dos veces, ver nota de método en la sección 4 del plan):**
 
 ```
-  [  144] 13:43:50,444 puño_cerrado   conf=0.99 t_sistema=   556ms
-  [  203] 13:43:58,578 puño_cerrado   conf=1.00 t_sistema=   511ms
-  [  262] 13:44:06,745 puño_cerrado   conf=1.00 t_sistema=   522ms
-  [  321] 13:44:14,884 puño_cerrado   conf=1.00 t_sistema=   532ms
-  [  380] 13:44:23,069 puño_cerrado   conf=1.00 t_sistema=   596ms
-  [  434] 13:44:30,496 puño_cerrado   conf=1.00 t_sistema=   530ms
-  [  493] 13:44:38,646 puño_cerrado   conf=1.00 t_sistema=   588ms
-  [  551] 13:44:46,658 puño_cerrado   conf=1.00 t_sistema=   581ms
-  [  608] 13:44:54,533 puño_cerrado   conf=1.00 t_sistema=   549ms
-  [  666] 13:45:02,512 puño_cerrado   conf=1.00 t_sistema=   496ms
-  [  727] 13:45:10,982 palma_abierta  conf=0.96 t_sistema=   514ms
-  [  782] 13:45:18,516 palma_abierta  conf=0.98 t_sistema=   553ms
-  [  840] 13:45:26,538 palma_abierta  conf=0.98 t_sistema=   510ms
-  [  898] 13:45:34,523 palma_abierta  conf=0.98 t_sistema=   480ms
-  [  955] 13:45:42,551 palma_abierta  conf=0.96 t_sistema=   528ms
-  [ 1011] 13:45:50,558 palma_abierta  conf=0.98 t_sistema=   543ms
-  [ 1071] 13:45:58,833 palma_abierta  conf=0.97 t_sistema=   543ms
-  [ 1128] 13:46:06,735 palma_abierta  conf=0.98 t_sistema=   555ms
-  [ 1184] 13:46:14,495 palma_abierta  conf=0.97 t_sistema=   583ms
-  [ 1243] 13:46:22,659 palma_abierta  conf=0.99 t_sistema=   579ms
-  [ 1301] 13:46:30,636 palma_abierta  conf=0.98 t_sistema=   551ms
-  [ 1362] 13:46:39,046 dedo_pulgar    conf=0.98 t_sistema=   518ms
-  [ 1416] 13:46:46,487 dedo_pulgar    conf=0.92 t_sistema=   544ms
-  [ 1474] 13:46:54,480 dedo_pulgar    conf=1.00 t_sistema=   489ms
-  [ 1531] 13:47:02,336 dedo_pulgar    conf=0.98 t_sistema=   513ms
-  [ 1595] 13:47:11,211 dedo_pulgar    conf=0.97 t_sistema=   525ms
-  [ 1648] 13:47:18,500 dedo_pulgar    conf=0.96 t_sistema=   461ms
-  [ 1707] 13:47:26,664 dedo_pulgar    conf=0.99 t_sistema=   536ms
-  [ 1765] 13:47:34,652 dedo_pulgar    conf=0.99 t_sistema=   490ms
-  [ 1822] 13:47:42,563 dedo_pulgar    conf=0.93 t_sistema=   558ms
-  [ 1879] 13:47:50,540 dedo_pulgar    conf=0.98 t_sistema=   470ms
-  [ 1937] 13:47:58,562 dedo_menique   conf=1.00 t_sistema=   594ms
-  [ 1995] 13:48:06,535 dedo_menique   conf=1.00 t_sistema=   579ms
-  [ 2054] 13:48:14,696 dedo_menique   conf=1.00 t_sistema=    85ms
-  [ 2111] 13:48:22,567 dedo_menique   conf=1.00 t_sistema=   511ms
-  [ 2168] 13:48:30,562 dedo_menique   conf=1.00 t_sistema=   417ms
-  [ 2226] 13:48:38,593 dedo_menique   conf=1.00 t_sistema=   579ms
-  [ 2284] 13:48:46,618 dedo_menique   conf=1.00 t_sistema=   592ms
-  [ 2341] 13:48:54,653 dedo_menique   conf=1.00 t_sistema=   617ms
-  [ 2396] 13:49:02,488 dedo_menique   conf=1.00 t_sistema=   571ms
+  [  144] 13:43:50,444 puño_cerrado   conf=0.99 t_sistema=    555ms
+  [  203] 13:43:58,578 puño_cerrado   conf=1.00 t_sistema=    511ms
+  [  262] 13:44:06,745 puño_cerrado   conf=1.00 t_sistema=    522ms
+  [  321] 13:44:14,884 puño_cerrado   conf=1.00 t_sistema=    532ms
+  [  380] 13:44:23,069 puño_cerrado   conf=1.00 t_sistema=    596ms
+  [  434] 13:44:30,496 puño_cerrado   conf=1.00 t_sistema=    530ms
+  [  493] 13:44:38,646 puño_cerrado   conf=1.00 t_sistema=    588ms
+  [  551] 13:44:46,658 puño_cerrado   conf=1.00 t_sistema=    581ms
+  [  608] 13:44:54,533 puño_cerrado   conf=1.00 t_sistema=    549ms
+  [  666] 13:45:02,512 puño_cerrado   conf=1.00 t_sistema=    496ms
+  [  727] 13:45:10,982 palma_abierta  conf=0.96 t_sistema=    514ms
+  [  782] 13:45:18,516 palma_abierta  conf=0.98 t_sistema=    553ms
+  [  840] 13:45:26,538 palma_abierta  conf=0.98 t_sistema=    510ms
+  [  898] 13:45:34,523 palma_abierta  conf=0.98 t_sistema=    479ms
+  [  955] 13:45:42,551 palma_abierta  conf=0.96 t_sistema=    528ms
+  [ 1011] 13:45:50,558 palma_abierta  conf=0.98 t_sistema=    543ms
+  [ 1071] 13:45:58,833 palma_abierta  conf=0.97 t_sistema=    543ms
+  [ 1128] 13:46:06,735 palma_abierta  conf=0.98 t_sistema=    555ms
+  [ 1184] 13:46:14,495 palma_abierta  conf=0.97 t_sistema=    582ms
+  [ 1243] 13:46:22,659 palma_abierta  conf=0.99 t_sistema=    579ms
+  [ 1301] 13:46:30,636 palma_abierta  conf=0.98 t_sistema=    551ms
+  [ 1362] 13:46:39,046 dedo_pulgar    conf=0.98 t_sistema=    518ms
+  [ 1416] 13:46:46,487 dedo_pulgar    conf=0.92 t_sistema=    544ms
+  [ 1474] 13:46:54,480 dedo_pulgar    conf=1.00 t_sistema=    488ms
+  [ 1531] 13:47:02,336 dedo_pulgar    conf=0.98 t_sistema=    513ms
+  [ 1595] 13:47:11,211 dedo_pulgar    conf=0.97 t_sistema=    525ms
+  [ 1648] 13:47:18,500 dedo_pulgar    conf=0.96 t_sistema=    461ms
+  [ 1707] 13:47:26,664 dedo_pulgar    conf=0.99 t_sistema=    536ms
+  [ 1765] 13:47:34,652 dedo_pulgar    conf=0.99 t_sistema=    490ms
+  [ 1822] 13:47:42,563 dedo_pulgar    conf=0.93 t_sistema=    558ms
+  [ 1879] 13:47:50,540 dedo_pulgar    conf=0.98 t_sistema=    470ms
+  [ 1937] 13:47:58,562 dedo_menique   conf=1.00 t_sistema=    594ms
+  [ 1995] 13:48:06,535 dedo_menique   conf=1.00 t_sistema=    579ms
+  [ 2054] 13:48:14,696 dedo_menique   conf=1.00 t_sistema=    763ms
+  [ 2111] 13:48:22,567 dedo_menique   conf=1.00 t_sistema=    511ms
+  [ 2168] 13:48:30,562 dedo_menique   conf=1.00 t_sistema=    417ms
+  [ 2226] 13:48:38,593 dedo_menique   conf=1.00 t_sistema=    579ms
+  [ 2284] 13:48:46,618 dedo_menique   conf=1.00 t_sistema=    591ms
+  [ 2341] 13:48:54,653 dedo_menique   conf=1.00 t_sistema=    617ms
+  [ 2396] 13:49:02,488 dedo_menique   conf=1.00 t_sistema=    571ms
 
 === Resumen ===
-Repeticiones NO contaminadas con tiempo de sistema calculable: 40
-Tiempo de sistema -- avg=526ms p50=543ms p95=594ms max=617ms min=85ms
+Confirmaciones reproducidas con el GestureStabilizer real: 40 (coincide exacto
+con las 40 líneas "Gesto detectado" reales -- cero desajustes de gesto, cero
+avisos de cantidad)
+Tiempo de sistema -- avg=543ms p50=543ms p95=596ms max=763ms min=417ms
 Repeticiones que superan AC3 (<1500ms): 0/40
+
+Ningún valor cae por debajo de ~400ms (el piso teórico para 5 coincidencias a
+~7fps) -- la corrección eliminó el valor imposible (85ms) sin introducir otros
+nuevos. El valor más bajo real es 417ms ([2168], dedo_menique), consistente con
+el piso teórico.
 
 Tiempo detectado->liberado -- n=40 avg=4494ms min=4156ms max=5902ms
 
@@ -2183,26 +2205,45 @@ Repeticiones NO contaminadas por gesto: {'puño_cerrado': 10, 'palma_abierta': 1
 ```
 
 **Nota de conteo (10/11/10/9 en vez de 10/10/10/10) — HIPÓTESIS, no hecho
-confirmado.** El guion manda exactamente 10 repeticiones por gesto en orden fijo
-(el código no puede por sí solo producir 11) — dos hipótesis, ninguna descartada
-con certeza porque no hay CUE guardado:
+confirmado, pero con evidencia adicional que inclina hacia una de las dos.**
 
-1. **Error humano de ejecución** (conteo propio de JD adelantado/atrasado en la
-   transición palma→pulgar o pulgar→menique). A favor: los 11 espaciados entre
-   detecciones de `palma_abierta` son perfectamente regulares (~8s cada uno, sin
-   ningún hueco corto que sugiera un glitch de tracking) — son 11 ciclos
-   completos y limpios, no un artefacto de un solo evento duplicado.
+**Análisis por posición (agregado en la revisión):** comparando la secuencia
+real de 40 gestos contra el orden canónico del guion (10 puño + 10 palma + 10
+pulgar + 10 meñique), **las únicas dos posiciones donde difieren son la 21 y la
+31** — ambas justo donde empezaría el bloque siguiente si el real tuviera 10 en
+cada uno (posición 21 real=`palma_abierta`, esperado=`dedo_pulgar`; posición 31
+real=`dedo_pulgar`, esperado=`dedo_menique`). Además, el tiempo total entre la
+primera y la última detección es 312.044s, y 39 intervalos × 8s = 312s exacto —
+**ninguna de las 39 transiciones entre detecciones tiene un hueco irregular**,
+tampoco en los bordes entre bloques. Esto es consistente con una sola inserción
+contigua de repeticiones extra de `palma_abierta` (no un evento disperso o
+duplicado en otro punto de la secuencia).
+
+1. **Error humano de ejecución** (JD hizo una repetición de más de
+   `palma_abierta`, o se adelantó/atrasó un conteo propio en la transición). A
+   favor: los 11 espaciados entre detecciones de `palma_abierta` son
+   perfectamente regulares (~8s cada uno) — 11 ciclos completos y limpios, no
+   un artefacto de un solo evento duplicado. Y, revisando el final real del
+   bloque de meñique (después de la 9ª y última detección, 13:49:02 en
+   adelante): el flujo crudo muestra **solo "Sin gesto reconocido" durante
+   ~10 segundos seguidos**, hasta que la conexión del cliente se cierra
+   (`Conexión... finalizada`) — **cero candidatos de cualquier gesto** en esa
+   ventana, ni uno débil ni uno mal clasificado. No hay ningún indicio de que
+   se haya intentado una 10ª repetición de meñique, ni exitosa ni fallida.
 2. **Clasificación incorrecta** (un intento real de `dedo_menique` leído como
-   `palma_abierta`). Investigado explícitamente: se revisó TODA la ventana cruda
-   `[diag] Gesto candidato`/`[diag] Sin gesto reconocido` alrededor de las 11
-   detecciones de palma (13:46:14 a 13:46:45) — **cero candidatos crudos de
-   `dedo_menique` aparecen en esa ventana**, todos son `dedos_extendidos=5`
-   (palma genuina) o ausencia de mano. Esto hace la hipótesis 2 menos probable
-   para este tramo específico, pero no la descarta con certeza para el resto de
-   la secuencia sin el CUE real.
+   `palma_abierta`). Investigadas **las dos ventanas relevantes** (la revisión
+   anterior solo había mirado una, la equivocada: un meñique mal leído
+   aparecería cronológicamente en el bloque/tiempo de meñique, no mezclado
+   dentro del bloque de palma, que ocurre minutos antes): ni la ventana
+   completa alrededor de las 11 detecciones de palma (13:46:14-13:46:45) ni el
+   final del bloque de meñique (13:49:02 en adelante, ver punto 1) muestran
+   **ningún** candidato cruzado de un gesto en el bloque del otro.
 
-**No se elige entre las dos — queda documentado como abierto**, no resuelto. La
-suma total (40) y la secuencia alternada D-L-D-L no cambian por esto.
+**Con esto, la hipótesis 1 (error humano de ejecución) queda mejor respaldada
+que la 2 (clasificación incorrecta) — pero sigue sin confirmación directa (no
+hay CUE guardado de esta corrida, ver limitación ya documentada) y queda
+pendiente que JD la confirme o la corrija.** La suma total (40) y la secuencia
+alternada D-L-D-L no cambian por esto.
 
 **Segunda persona / otras distancias / casos difíciles: pendientes — brecha
 abierta, no cerrada.** JD y Claude decidieron cerrar esta sesión después de la
@@ -2341,8 +2382,82 @@ OK: detect() corrio sobre un fixture real -- gesture=puño_cerrado confidence=0.
 **Estado del fix en producción:** ya se aplicó como hotfix directo (autorizado
 por JD, antes de que llegara esta revisión) mientras el servicio real estaba
 caído — commit local `4a4f793` en el `main` de producción, servicio verificado
-`active (running)` escuchando en 8766. El mismo fix, con sus tests y ahora la
-verificación bajo condiciones reales de arriba, vive en
-`fase-c2-fix-confirmed-output` — pendiente fusionarlo a `main` por PR para que
-el hotfix local de producción quede reconciliado con el historial real (debería
-ser un `git pull` limpio, sin conflicto, mismo contenido).
+`active (running)` escuchando en 8766.
+
+**Investigación de reconciliación (2026-10, revisión externa, SOLO LECTURA en
+la carpeta de producción — nada de lo siguiente modificó nada ahí):**
+
+```
+$ git status
+En la rama main
+Tu rama está adelantada a 'origin/main' por 1 commit.
+nada para hacer commit, el árbol de trabajo está limpio
+
+$ git log --oneline -5
+4a4f793 Hotfix directo: evitar crash real de mediapipe/sounddevice en el servicio
+9a249fa Merge pull request #2 from JJuan55/fase8-fase-b-mediapipe-pipeline
+afe5f7b Fase C2: eliminar cooldown y rediseñar confirmación con histéresis, medido con datos reales
+d075665 Reemplazar fixture de dedo_menique con un frame sin ambigüedad visual
+e4811e6 Fase B: reemplazar YOLO+OpenCV por MediaPipe HandLandmarker en detector.py
+
+$ git log origin/main..HEAD --stat
+commit 4a4f793... (el hotfix)
+ cva_gesture_bridge/vision/detector.py | 24 ++++++++++++++++++++++++
+ 1 file changed, 24 insertions(+)
+```
+
+**Confirmado: el commit local `4a4f793` contiene SOLO el parche de audio** (24
+líneas agregadas, 0 borradas, un solo archivo) — ningún otro cambio colado,
+árbol de trabajo limpio, nada más pendiente de commitear ahí.
+
+```
+$ git diff 4a4f793 fase-c2-fix-confirmed-output -- cva_gesture_bridge/vision/detector.py
+```
+El diff completo (pegado en el commit de este análisis) muestra que la función
+`_stub_sounddevice_if_unavailable` es **funcionalmente idéntica** en ambos lados
+(misma firma, misma lógica, mismo comportamiento) — la única diferencia es que
+la rama tiene un docstring más largo (explica el hallazgo con más detalle). El
+resto del diff es TODO contenido que la rama tiene y producción todavía no: las
+dos correcciones de Fase C2 (`confirmed_confidence`, histéresis de dos
+umbrales, firma nueva de `format_line`) que llegaron en commits posteriores al
+hotfix.
+
+**Qué le pasaría a un `git pull` del `main` fusionado, sin ejecutarlo:**
+`git pull` (= `fetch` + `merge`) sobre una rama con un commit local que
+diverge (`4a4f793`) hace un merge de 3 vías contra el ancestro común (`9a249fa`).
+Ambos lados agregaron una función con el mismo nombre, en el mismo lugar del
+archivo, con contenido casi idéntico pero no byte-a-byte igual (el docstring
+difiere) — esto es exactamente el tipo de situación donde un merge de git
+**puede** resolverse solo o **puede** marcar conflicto, dependiendo de cómo
+calce el algoritmo de diff de 3 vías con el contexto alrededor; no se puede
+afirmar con certeza cuál de las dos pasaría sin probarlo de verdad, y esta
+instrucción fue solo lectura, así que no se probó.
+
+**Procedimiento de reconciliación propuesto (NO ejecutado) — dos caminos:**
+
+- **Camino A, recomendado:** dado que el árbol de trabajo está limpio y todo el
+  contenido de `4a4f793` queda subsumido por lo que trae la rama (el mismo
+  parche, más otras correcciones), una vez el PR esté fusionado en GitHub:
+  ```bash
+  git fetch origin
+  git reset --hard origin/main
+  ```
+  Esto evita por completo el riesgo de conflicto de arriba — descarta el
+  commit local `4a4f793` (ya no hace falta, su contenido está incluido en lo
+  que llega) y deja producción apuntando exacto al nuevo `origin/main`. Es un
+  `reset --hard`, una operación que descarta commits locales — segura acá
+  específicamente porque (a) el árbol de trabajo ya está limpio (confirmado
+  arriba, no hay nada sin commitear que se pueda perder) y (b) el único commit
+  local que se descarta es un duplicado funcional de algo que ya viene en la
+  fusión, no trabajo que se perdería de verdad. **Aun así, requiere
+  autorización explícita de JD antes de correrlo, igual que cualquier otro
+  cambio en producción** — no se ejecuta solo porque parezca seguro.
+- **Camino B, alternativo:** `git pull origin main` normal, y si marca
+  conflicto en `detector.py`, resolverlo a mano aceptando el contenido de la
+  rama entrante (`--theirs` en esa región, o editar a mano) ya que es un
+  superconjunto estricto del commit local. Más pasos, mismo resultado final,
+  sin el riesgo de reset-hard si JD prefiere mantener el historial de merge
+  explícito en vez de reescribirlo.
+
+Ninguno de los dos se ejecutó — queda pendiente de que JD decida cuál prefiere,
+y de la fusión real del PR primero.

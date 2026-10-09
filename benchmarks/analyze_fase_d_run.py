@@ -1,9 +1,26 @@
 """Fase D -- analiza un log real del bridge de prueba contra las reglas definidas
-en el plan (BITACORA.md "Fase D"): tiempo de sistema (racha continua de [diag]
-Gesto candidato hasta la confirmación), % de aciertos sobre repeticiones NO
-contaminadas, repeticiones contaminadas (sin "Gesto liberado" inmediatamente
-antes, salvo la primera de toda la batería), líneas por repetición, tiempo de
-liberación.
+en el plan (BITACORA.md "Fase D"): tiempo de sistema, % de aciertos sobre
+repeticiones NO contaminadas, repeticiones contaminadas (sin "Gesto liberado"
+inmediatamente antes, salvo la primera de toda la batería), líneas por
+repetición, tiempo de liberación.
+
+Tiempo de sistema -- corregido (revisión externa, 2026-10): la primera versión
+medía la racha CONTINUA de `[diag] Gesto candidato` con el mismo gesto hasta la
+confirmación. Error real: `GestureStabilizer` confirma con 5 coincidencias de 7
+y TOLERA frames intercalados (no exige racha exacta, ver su propio docstring en
+detector.py) -- una racha continua subestima el tiempo real siempre que hubo
+ruido intercalado antes de la coincidencia más antigua de la ventana real. Esto
+se confirmó con un caso imposible en los datos: una repetición midió 85ms, pero
+5 frames a ~7fps (≈143ms entre frames) necesitan como mínimo ~572ms entre el
+primero y el último, así que 85ms no podía ser real.
+
+Ahora se REPRODUCE el algoritmo real (se importa `GestureStabilizer` tal cual,
+no se reimplementa su lógica aparte) sobre la secuencia cruda completa de
+observaciones (`[diag] Gesto candidato`/`[diag] Sin gesto reconocido`, en orden,
+incluyendo `None`) -- al momento exacto en que el stabilizer real confirma, se
+busca la coincidencia MÁS ANTIGUA dentro de los últimos `window_size` (7)
+observaciones evaluadas (la ventana real que el propio algoritmo usó), no la
+racha continua más reciente.
 
 No se importa desde el paquete. Uso:
     .venv-fase-c2-fix/bin/python benchmarks/analyze_fase_d_run.py <log_file> [cue_log_file]
@@ -17,9 +34,17 @@ QUITA), avisando explícitamente si los conteos no coinciden en vez de alinear a
 ciegas.
 """
 
+import os
 import re
 import sys
+from collections import deque
 from datetime import datetime
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT = os.path.dirname(HERE)
+sys.path.insert(0, REPO_ROOT)
+
+from cva_gesture_bridge.vision.detector import GestureStabilizer  # noqa: E402
 
 TS_RE = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3})")
 DIAG_CANDIDATE_RE = re.compile(r"\[diag\] Gesto candidato: (\S+) \(confianza=([\d.]+)")
@@ -112,46 +137,61 @@ def main():
     print(f"Contaminadas (sin liberacion previa, salvo la primera): {n_contaminated}")
     print()
 
-    # --- 3) Tiempo de sistema por repeticion: racha continua de diag_candidato
-    # con el MISMO gesto, terminando justo antes del evento "detectado". ---
-    print("=== Detalle por repetición ===")
+    # --- 3) Tiempo de sistema por repetición: se REPRODUCE el GestureStabilizer
+    # real sobre la secuencia cruda completa (diag_candidato/diag_none, en orden)
+    # -- al momento en que confirma de verdad, se busca la coincidencia MÁS
+    # ANTIGUA dentro de los últimos window_size observaciones (la ventana real
+    # que usó el algoritmo), no una racha continua. ---
+    raw_observations = [
+        (ts, data[0] if kind == "diag_candidato" else None)
+        for ts, kind, data in events
+        if kind in ("diag_candidato", "diag_none")
+    ]
+
+    stabilizer = GestureStabilizer()  # window_size=7, min_matches=5 (defaults reales)
+    # Se lee el atributo "privado" a propósito -- así esta ventana de análisis
+    # queda sincronizada con el tamaño real del stabilizer aunque cambie el
+    # default en el futuro, en vez de duplicar el número 7 a mano aparte.
+    window = deque(maxlen=stabilizer._window_size)
+    confirm_events = []  # (confirm_ts, gesture, t_sistema_ms) en cada CAMBIO de confirmado
+    prev_confirmed = None
+    for ts, gesture in raw_observations:
+        window.append((ts, gesture))
+        confirmed = stabilizer.observe(gesture)
+        if confirmed is not None and confirmed != prev_confirmed:
+            matching_ts = [t for (t, g) in window if g == confirmed]
+            earliest_ts = min(matching_ts)  # siempre hay al menos 1 (la que acaba de confirmar)
+            t_sistema_ms = (ts - earliest_ts).total_seconds() * 1000
+            confirm_events.append((ts, confirmed, t_sistema_ms))
+        prev_confirmed = confirmed
+
+    print(f"Confirmaciones reproducidas con el GestureStabilizer real: {len(confirm_events)}")
+    if len(confirm_events) != len(reps):
+        print(
+            f"AVISO: {len(confirm_events)} confirmaciones reproducidas vs {len(reps)} "
+            f"líneas 'Gesto detectado' reales -- no coinciden en cantidad, revisar antes "
+            f"de confiar en el emparejamiento por orden de abajo."
+        )
+
+    print("\n=== Detalle por repetición ===")
     clean_system_times = []
-    wrong_gesture_sent_before = {}  # detect_idx -> bool
 
-    for r in reps:
-        # Buscar hacia atras desde justo antes de detect_idx la racha continua de
-        # diag_candidato con el gesto correcto.
+    for r, (confirm_ts, confirmed_gesture, t_sistema_ms) in zip(reps, confirm_events):
         gesture = r["gesture"]
-        i = r["detect_idx"] - 1
-        streak_start_ts = None
-        wrong_sent = False
-        while i >= 0:
-            ts_i, kind_i, data_i = events[i]
-            if kind_i == "detectado" or kind_i == "liberado":
-                break  # tope: el evento anterior de la repeticion previa
-            if kind_i == "diag_candidato" and data_i[0] == gesture:
-                streak_start_ts = ts_i
-                i -= 1
-                continue
-            # cualquier otra cosa (diag_none, diag_candidato de otro gesto) corta
-            # la racha continua -- pero seguimos retrocediendo por si hay otra
-            # racha mas atras (no la usamos para el tiempo de sistema, solo
-            # confirmamos que no se mando un gesto incorrecto antes).
-            break
-        if streak_start_ts is not None:
-            system_ms = (r["detect_ts"] - streak_start_ts).total_seconds() * 1000
-        else:
-            system_ms = None
+        # Chequeo de consistencia: el gesto reproducido debe coincidir con el de
+        # la línea real "Gesto detectado" -- si no, el emparejamiento por orden
+        # se rompió en algún punto anterior.
+        mismatch = " **DESAJUSTE vs log real**" if confirmed_gesture != gesture else ""
 
-        if not r["contaminated"] and system_ms is not None:
-            clean_system_times.append(system_ms)
+        if not r["contaminated"]:
+            clean_system_times.append(t_sistema_ms)
 
         marca = "CONTAMINADA" if r["contaminated"] else ""
         print(
             f"  [{r['detect_idx']:5d}] {r['detect_ts'].strftime('%H:%M:%S,%f')[:-3]} "
             f"{gesture:14s} conf={r['confidence']:.2f} "
-            f"t_sistema={'%.0fms' % system_ms if system_ms is not None else 'n/d':>8s} "
-            f"{marca}"
+            f"t_sistema={t_sistema_ms:7.0f}ms "
+            f"{marca}{mismatch}"
         )
 
     print()
