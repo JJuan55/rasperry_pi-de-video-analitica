@@ -33,7 +33,9 @@ puño_cerrado, palma_abierta, dedo_pulgar, dedo_menique.
 
 import logging
 import math
+import sys
 import time
+import types
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
@@ -94,31 +96,52 @@ class GestureStabilizer:
       aparece al menos `min_matches` veces dentro de las últimas `window_size`
       observaciones crudas (default 5 de 7 — a ~143ms/frame real del cliente, eso
       son ~715ms en el peor caso, dentro de AC3 <1.5s con margen).
-    - **Soltar un gesto ya confirmado (histéresis)**: NO se suelta por un solo frame
-      de ruido ni por una racha corta — se mantiene el último gesto confirmado
-      mientras no se acumulen `release_after_misses` observaciones SEGUIDAS que no
-      sean ese gesto. El 100% del ruido real medido en los 40 tramos de gesto
-      sostenido de Fase A/recaptura de meñique fue `None` (mano perdida un
-      instante), nunca otro gesto real en conflicto — la racha de ruido más larga
-      observada fue 14 frames seguidos; `release_after_misses=20` por defecto deja
-      margen real sobre ese peor caso medido, no un número arbitrario.
+    - **Soltar un gesto ya confirmado (histéresis), dos umbrales distintos** (fix
+      2026-10, ver BITACORA.md "Fase C2 — corrección antes de Fase D"): con un solo
+      umbral largo, retirar la mano de cuadro dejaba un "gesto fantasma" confirmado
+      varios segundos de más. `hand_present` (pasado en cada `observe()`) distingue
+      los dos casos reales medidos — pero OJO, la intuición inicial de que "sin
+      mano se puede soltar casi de inmediato" NO se sostuvo contra los datos: el
+      ruido de mano ausente dentro de un gesto genuinamente sostenido también tiene
+      rachas largas (máxima medida: 13 frames, casi igual que los 14 de mano
+      presente/ambigua — ver `benchmarks/inspect_noise_by_hand_presence.py`). Los
+      dos umbrales por default quedan con margen real sobre su propio peor caso
+      medido, no con una asimetría grande:
+        * Mano realmente ausente (`hand_present=False`):
+          `release_after_misses_no_hand` (default 16, margen sobre 13).
+        * Mano presente pero con forma ambigua o gesto distinto que todavía no
+          junta su propia mayoría (`hand_present=True`): `release_after_misses`
+          (default 20, margen sobre 14) — esto es lo que protege contra ruido real
+          dentro de un gesto genuinamente sostenido.
+    - **Confianza del gesto confirmado**: no es la del frame crudo actual (que puede
+      ser de un gesto distinto por ruido aislado) — `confirmed_confidence` guarda la
+      confianza del último frame que sí coincidió con el gesto confirmado.
     """
 
-    def __init__(self, window_size: int = 7, min_matches: int = 5, release_after_misses: int = 20) -> None:
+    def __init__(
+        self,
+        window_size: int = 7,
+        min_matches: int = 5,
+        release_after_misses: int = 20,
+        release_after_misses_no_hand: int = 16,
+    ) -> None:
         from collections import deque
 
         self._window_size = window_size
         self._min_matches = min_matches
         self._release_after_misses = release_after_misses
+        self._release_after_misses_no_hand = release_after_misses_no_hand
         self._history: deque = deque(maxlen=window_size)
         self._confirmed: Optional[str] = None
+        self._confirmed_confidence = 0.0
         self._misses_since_match = 0
 
-    def observe(self, gesture: Optional[str]) -> Optional[str]:
+    def observe(self, gesture: Optional[str], confidence: float = 0.0, hand_present: bool = True) -> Optional[str]:
         self._history.append(gesture)
 
         if gesture is not None and gesture == self._confirmed:
             self._misses_since_match = 0
+            self._confirmed_confidence = confidence
             return self._confirmed
 
         if gesture is not None:
@@ -126,17 +149,24 @@ class GestureStabilizer:
             if matches >= self._min_matches:
                 self._confirmed = gesture
                 self._misses_since_match = 0
+                self._confirmed_confidence = confidence
                 return self._confirmed
 
         # Ni coincide con lo ya confirmado ni alcanza mayoría propia todavía --
         # cuenta como un "miss" del gesto confirmado (incluye gesture=None).
         if self._confirmed is not None:
             self._misses_since_match += 1
-            if self._misses_since_match >= self._release_after_misses:
+            threshold = self._release_after_misses if hand_present else self._release_after_misses_no_hand
+            if self._misses_since_match >= threshold:
                 self._confirmed = None
+                self._confirmed_confidence = 0.0
                 self._misses_since_match = 0
 
         return self._confirmed
+
+    @property
+    def confirmed_confidence(self) -> float:
+        return self._confirmed_confidence
 
 
 class OneEuroFilter:
@@ -259,13 +289,53 @@ def classify_world_landmarks(landmarks_xyz: List[Tuple[float, float, float]]) ->
     return None, n_extended
 
 
-def format_line(result: GestureResult, min_confidence: float) -> Optional[str]:
+def format_line(gesture: Optional[str], confidence: float, min_confidence: float) -> Optional[str]:
     """Línea a mandar por `TcpServer.send_line` (sección 4.4 de CLAUDE.md) — solo
     gesto + confianza, nunca una instrucción de actuador (Fase 9). Sin cambios de
-    formato desde Fase 8."""
-    if result.gesture is None or result.confidence < min_confidence:
+    formato desde Fase 8.
+
+    Toma `gesture`/`confidence` sueltos, no un `GestureResult` completo (cambiado en
+    Fase C2, ver BITACORA.md "corrección antes de Fase D") — lo que se manda al
+    cliente es el gesto YA CONFIRMADO por `GestureStabilizer` y su
+    `confirmed_confidence`, no el resultado crudo de un solo frame (que puede ser de
+    otro gesto distinto por ruido aislado mientras el confirmado sigue vigente)."""
+    if gesture is None or confidence < min_confidence:
         return None
-    return f"gesto: {result.gesture}, confianza: {result.confidence:.2f}"
+    return f"gesto: {gesture}, confianza: {confidence:.2f}"
+
+
+RELEASE_LINE = "gesto: ninguno"
+"""Línea enviada cuando un gesto confirmado se suelta (mano retirada o reemplazada
+por otro gesto) -- evento explícito pedido en Fase C2 para que el cliente (y la
+Fase 9, cuando ejecute instrucciones reales) sepan que el gesto sostenido terminó,
+en vez de inferirlo por la ausencia de nuevas líneas."""
+
+
+def _stub_sounddevice_if_unavailable() -> None:
+    """Incidente real de Fase D (ver BITACORA.md "Fase D", corrección de
+    despliegue): `mediapipe==1.0.1` importa, SIEMPRE y sin excepción,
+    `mediapipe.tasks.python.audio` al cargar `mediapipe.tasks.python` (este
+    proyecto solo usa `vision.HandLandmarker`, nunca audio) — y ese submódulo
+    importa `sounddevice`, que intenta inicializar PortAudio/PulseAudio en el
+    momento mismo del import, no de forma perezosa. En una sesión interactiva por
+    SSH esto pasa desapercibido porque suele haber una sesión de PulseAudio de
+    usuario alcanzable; en el servicio real (`cva-gesture-bridge.service`, unidad
+    de *sistema* de systemd, sin sesión de audio de ningún usuario) esto hace que
+    el proceso completo crashee en bucle al arrancar
+    (`sounddevice.PortAudioError: ... Can't connect to server`), aunque el
+    detector nunca use audio para nada.
+
+    Si `sounddevice` ya se puede importar de verdad (típico en una sesión
+    interactiva), no se hace nada -- esto NO oculta un error real de audio en los
+    casos donde sí hay sesión disponible, un stub en blanco solo se instala
+    cuando la importación real falla."""
+    if "sounddevice" in sys.modules:
+        return
+    try:
+        import sounddevice  # noqa: F401
+    except Exception:
+        stub = types.ModuleType("sounddevice")
+        sys.modules["sounddevice"] = stub
 
 
 class GestureDetector:
@@ -281,6 +351,7 @@ class GestureDetector:
     ) -> None:
         # Import perezoso: mediapipe es pesado, no hace falta para importar el módulo
         # (los tests de geometría pura no lo necesitan).
+        _stub_sounddevice_if_unavailable()
         import mediapipe as mp
         from mediapipe.tasks import python as mp_python
         from mediapipe.tasks.python import vision as mp_vision
@@ -339,5 +410,5 @@ class GestureDetector:
         gesture, extended = classify_world_landmarks(smoothed_xyz)
         return GestureResult(gesture, confidence if gesture is not None else 0.0, extended)
 
-    def format_line(self, result: GestureResult) -> Optional[str]:
-        return format_line(result, self._min_confidence)
+    def format_line(self, gesture: Optional[str], confidence: float) -> Optional[str]:
+        return format_line(gesture, confidence, self._min_confidence)

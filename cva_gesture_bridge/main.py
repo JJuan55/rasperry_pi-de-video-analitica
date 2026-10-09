@@ -18,7 +18,7 @@ from cva_gesture_bridge import config
 from cva_gesture_bridge.logging_setup import configure_logging
 from cva_gesture_bridge.transport.tcp_server import TcpServer
 from cva_gesture_bridge.transport.watchdog import Watchdog
-from cva_gesture_bridge.vision.detector import GestureDetector, GestureStabilizer
+from cva_gesture_bridge.vision.detector import RELEASE_LINE, GestureDetector, GestureStabilizer
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +54,7 @@ def _make_on_jpeg_frame(
     stability_window: int,
     stability_min_matches: int,
     stability_release_after_misses: int,
+    stability_release_after_misses_no_hand: int,
 ):
     # last_processed_at y stabilizer viven en este closure, creado una sola vez por
     # arranque del bridge — tanto el cooldown como la ventana de estabilidad son
@@ -65,11 +66,17 @@ def _make_on_jpeg_frame(
         window_size=stability_window,
         min_matches=stability_min_matches,
         release_after_misses=stability_release_after_misses,
+        release_after_misses_no_hand=stability_release_after_misses_no_hand,
     )
     capture_dir = config.CAPTURE_FRAMES_DIR  # leído una vez al armar el callback
+    # Último gesto CONFIRMADO que de verdad se mandó por el socket -- con
+    # GESTURE_COOLDOWN_SECONDS≈0 (Fase C2) se evalúa casi cada frame real, así que
+    # sin esto se mandaría la misma línea por cada frame mientras se sostiene un
+    # gesto (fix 2026-10, ver BITACORA.md "Fase C2 — corrección antes de Fase D").
+    last_sent_gesture = None
 
     async def on_jpeg_frame(jpeg_bytes: bytes, writer: asyncio.StreamWriter) -> None:
-        nonlocal last_processed_at
+        nonlocal last_processed_at, last_sent_gesture
         now = time.monotonic()
         in_cooldown = last_processed_at is not None and (now - last_processed_at) < cooldown_seconds
 
@@ -106,7 +113,16 @@ def _make_on_jpeg_frame(
         # se manda al cliente hasta que aparece al menos `stability_min_matches` veces
         # dentro de las últimas `stability_window` detecciones (ventana deslizante,
         # no una racha exacta — ver GestureStabilizer).
-        confirmed_gesture = stabilizer.observe(result.gesture)
+        #
+        # hand_present distingue "mano realmente ausente" (gesture=None con
+        # extended_fingers==0 -- el único caso donde eso pasa junto, ver
+        # classify_world_landmarks: 0 dedos extendidos CON mano real siempre clasifica
+        # puño_cerrado, nunca None) de "mano presente pero con forma ambigua o un
+        # gesto distinto que todavía no junta mayoría" -- Fase C2, corrección antes de
+        # Fase D (ver BITACORA.md): libera rápido en el primer caso, protege con
+        # histéresis larga en el segundo.
+        hand_present = not (result.gesture is None and result.extended_fingers == 0)
+        confirmed_gesture = stabilizer.observe(result.gesture, result.confidence, hand_present)
 
         # DIAGNÓSTICO TEMPORAL (2026-09-18, ver BITACORA.md "Fase 8"): a propósito en
         # INFO, no DEBUG, mismo motivo que en detector.py. Revertir a logger.debug una
@@ -120,16 +136,32 @@ def _make_on_jpeg_frame(
         else:
             logger.info("[diag] Sin gesto reconocido en este frame (dedos_extendidos=%d)", result.extended_fingers)
 
+        if confirmed_gesture == last_sent_gesture:
+            # Nada cambió desde la última línea mandada -- no repetir (fix 2026-10,
+            # ver BITACORA.md "Fase C2 — corrección antes de Fase D").
+            return
+
         if confirmed_gesture is None:
+            # El gesto confirmado se soltó -- evento explícito, no silencio, para que
+            # el cliente (y la Fase 9, cuando ejecute instrucciones reales) sepan que
+            # terminó en vez de inferirlo por la ausencia de nuevas líneas.
+            logger.info("Gesto liberado (antes: %s)", last_sent_gesture)
+            await TcpServer.send_line(writer, RELEASE_LINE)
+            last_sent_gesture = None
             return
 
         logger.info(
-            "Gesto detectado: %s (confianza=%.2f, dedos_extendidos=%d)",
-            result.gesture, result.confidence, result.extended_fingers,
+            "Gesto detectado: %s (confianza=%.2f)",
+            confirmed_gesture, stabilizer.confirmed_confidence,
         )
-        line = detector.format_line(result)
+        line = detector.format_line(confirmed_gesture, stabilizer.confirmed_confidence)
         if line is not None:
             await TcpServer.send_line(writer, line)
+            last_sent_gesture = confirmed_gesture
+        # Si format_line da None (confianza confirmada por debajo de MIN_CONFIDENCE),
+        # last_sent_gesture NO se actualiza a propósito -- así, si en un frame
+        # siguiente la confianza sube sin que el gesto cambie, se vuelve a intentar
+        # mandar en vez de quedar nunca más intentado.
 
     return on_jpeg_frame
 
@@ -183,6 +215,7 @@ async def run() -> None:
             config.GESTURE_STABILITY_WINDOW,
             config.GESTURE_STABILITY_MIN_MATCHES,
             config.GESTURE_RELEASE_AFTER_MISSES,
+            config.GESTURE_RELEASE_AFTER_MISSES_NO_HAND,
         ),
     )
     await server.start()

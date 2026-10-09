@@ -1653,3 +1653,811 @@ miden y por qué.
   con su propia cadencia real de llegada — no es lo mismo que medir end-to-end con
   el bridge de Fase B corriendo de verdad contra un cliente real. Es la mejor
   aproximación disponible sin tocar producción; la medición definitiva es Fase D.
+
+## Fase C2 — corrección antes de Fase D (2026-10)
+
+Revisión externa de `afe5f7b` (ya fusionado en `main` vía PR #2) encontró que
+`main.py` no usaba bien el `GestureStabilizer` nuevo: mandaba el resultado CRUDO de
+cada frame, no el gesto ya CONFIRMADO, y con `GESTURE_COOLDOWN_SECONDS≈0` eso
+significaba una línea por frame mientras se sostenía un gesto. Trabajo hecho sobre
+una rama nueva desde `main` (`fase-c2-fix-confirmed-output`, worktree
+`~/video_analitica/cva-pi-repo-fase-c2-fix`) — no toca el `.venv` de producción ni
+el servicio real.
+
+### 1. Bug real confirmado antes de tocar nada
+
+`cva_gesture_bridge/main.py` línea 130 (antes del fix): `detector.format_line(result)`
+usaba `result` (el `GestureResult` crudo de ESE frame), no `confirmed_gesture` (lo
+que de verdad gatea el envío un poco más arriba). Con un gesto sostenido y
+`cooldown≈0`, un solo frame ruidoso de otro gesto (ej. `dedo_pulgar` en medio de un
+`puño_cerrado` sostenido) se mandaba al cliente tal cual, aunque el gesto
+*confirmado* siguiera siendo `puño_cerrado` por histéresis. Confirmado leyendo el
+código real antes de asumir que el reporte externo tenía razón.
+
+### 2. Gesto confirmado + confianza asociada
+
+`GestureStabilizer.observe()` ahora recibe `confidence` además de `gesture`, y
+expone `confirmed_confidence` (propiedad de solo lectura): la confianza del
+**último frame que coincidió con el gesto confirmado**, no la del frame crudo
+actual (que puede ser de otro gesto por ruido aislado). Elegida esta opción (vs.
+promediar toda la ventana) porque refleja la evidencia más reciente real del gesto
+sostenido, sin arrastrar confianzas viejas de muy atrás en una sesión larga de
+histéresis, y es la más simple de razonar/testear. `main.py` arma la línea con
+`detector.format_line(confirmed_gesture, stabilizer.confirmed_confidence)`, no con
+`result`. `format_line()` (función libre y método de `GestureDetector`) cambiaron
+de firma: toman `gesture`/`confidence` sueltos, ya no un `GestureResult` completo.
+
+### 3. Enviar solo en el cambio, con evento explícito de liberación
+
+Con `cooldown≈0` (Fase C2), antes de este fix se mandaba una línea por cada frame
+procesado mientras un gesto seguía confirmado. Ahora `main.py` guarda
+`last_sent_gesture` en el closure y solo llama a `TcpServer.send_line` cuando
+`confirmed_gesture` cambia respecto al último valor mandado:
+
+- Gesto nuevo confirmado (o cambio de gesto): se manda `"gesto: X, confianza: Y"`
+  una sola vez.
+- Gesto confirmado se suelta (histéresis libera): se manda `RELEASE_LINE =
+  "gesto: ninguno"` una sola vez — evento explícito para que el cliente, y la Fase
+  9 cuando ejecute instrucciones reales, sepan que terminó en vez de inferirlo por
+  silencio.
+- Nada se manda al arrancar si nunca hubo nada confirmado (el chequeo
+  `confirmed_gesture == last_sent_gesture` con ambos en `None` lo cubre).
+
+**Sobre el "latido periódico" que planteaba el reporte** (reenviar la línea cada
+cierto intervalo mientras se sostiene, útil si un actuador real necesita
+refrescarse continuamente): **no se implementó en esta corrección.** No hay datos
+reales todavía para justificar un intervalo — el único caso de uso que lo
+necesitaría (Fase 9, accionar un actuador de forma continua mientras se sostiene un
+gesto, ej. un robot que debe seguir moviéndose) no está construido, así que
+cualquier número que se elija ahora sería inventado, no medido. Queda anotado como
+decisión pendiente para cuando Fase 9 defina los requisitos reales de control
+continuo — si hace falta, se agrega entonces con el mismo criterio de "con datos,
+no a ojo" del resto de este proyecto.
+
+### 4. Tiempo de liberación — dos umbrales, con un hallazgo real que corrigió la intuición inicial
+
+Con un solo `release_after_misses=20`, retirar la mano de cuadro de verdad dejaba
+un "gesto fantasma" confirmado ~2.86s de más (20 misses × ~143ms) — problema real
+si esto llega a controlar un actuador. La intuición inicial (y la del reporte
+externo) era: "mano ausente no tiene ambigüedad que proteger, se puede soltar casi
+de inmediato" — un umbral corto, separado del que protege contra ruido con mano
+presente.
+
+**Esa intuición no se sostuvo contra los datos reales.** Se extendió el caché de
+secuencias (`cache_raw_sequences.py`, ahora guarda también `extended_fingers`) y se
+corrió `benchmarks/inspect_noise_by_hand_presence.py` sobre los mismos 40 tramos de
+gesto genuinamente sostenido: de 87 frames de ruido total, 23 (26.4%) fueron mano
+AUSENTE (`gesture=None`, `extended_fingers==0` — el único caso donde eso pasa
+junto, ver `classify_world_landmarks`) y 64 (73.6%) mano presente pero
+ambigua/conflicto. **La racha de ruido más larga con mano ausente fue 13 frames
+seguidos — casi igual que los 14 de mano presente.** Un umbral corto (se había
+puesto un placeholder de 3 mientras llegaban los datos) habría soltado gestos
+reales genuinamente sostenidos por error, cada vez que MediaPipe perdiera el
+tracking un instante por un micro-ajuste de la mano.
+
+**Decisión final, con margen real sobre el peor caso de cada tipo, no una
+asimetría grande:**
+
+- `GESTURE_RELEASE_AFTER_MISSES` (mano presente/ambigua) = **20** (margen sobre 14,
+  sin cambios respecto al valor original de Fase C2).
+- `GESTURE_RELEASE_AFTER_MISSES_NO_HAND` (mano realmente ausente) = **16** (margen
+  sobre 13).
+
+**Compromiso explícito, no resuelto a fondo:** esto da una mejora real pero
+modesta en el caso de mano retirada de verdad (2.86s → 2.29s), no la mejora grande
+que la intuición inicial sugería — los datos no la soportan sin arriesgar
+liberaciones falsas durante sostenimientos reales. Una liberación más rápida
+todavía podría valer la pena, pero necesitaría una señal mejor que "cuadros
+seguidos sin mano cruda" (ej. alguna noción de tendencia/confianza acumulada) —
+queda anotado para Fase D si JD lo considera necesario, no inventado aquí.
+
+`hand_present` se calcula en `main.py` como
+`not (result.gesture is None and result.extended_fingers == 0)` y se pasa a
+`stabilizer.observe()` en cada frame.
+
+### 5. Validación de punta a punta contra datos reales (no solo tests sintéticos)
+
+`benchmarks/simulate_full_pipeline.py` reproduce el pipeline completo (observe con
+confidence/hand_present, envío solo en el cambio, evento de liberación) sobre las
+3 sesiones reales cacheadas:
+
+| sesión | frames reales | líneas que se habrían mandado (antes: 1 por frame) | gestos | liberaciones |
+|---|---|---|---|---|
+| `captured_frames_2026-09-25` | 2132 | 17 | 14 | 3 |
+| `captured_frames_2026-09-25_v2` | 3727 | 35 | 18 | 17 |
+| `captured_frames_2026-10-02_menique` | 1946 | 19 | 12 | 7 |
+
+Inspección manual de la secuencia completa (no solo el conteo): cada cambio de
+gesto real produce exactamente una línea `"gesto: X"`, y en la sesión `_v2`
+(protocolo "mano fuera de cuadro entre gestos") cada retiro real de mano produce su
+`"gesto: ninguno"` antes del siguiente gesto — patrón alternado limpio, consistente
+con el protocolo real de esa sesión.
+
+### 6. Tests
+
+`tests/test_detector.py`: `format_line` actualizado a la firma nueva (3 tests);
+`GestureStabilizer` — 4 tests nuevos (`confirmed_confidence` sigue al último frame
+que coincide, se resetea a 0.0 al soltar, los dos umbrales se usan por separado
+según `hand_present`, el default de mano ausente (16) sobrevive el peor caso real
+medido (13)).
+
+`tests/test_main.py` reescrito: además de actualizar las 13 llamadas a
+`_make_on_jpeg_frame` (parámetro nuevo), se agregaron los 4 casos pedidos
+explícitamente en la revisión — `test_sustained_gesture_sends_exactly_one_message_not_one_per_frame`
+(puño sostenido 10 frames → 1 solo mensaje, con `detector.calls==10` confirmando
+que sí se siguió evaluando cada frame), `test_a_single_noisy_frame_while_already_confirmed_does_not_resend`
+(frame ruidoso ya confirmado → no reenvía), `test_gesture_switch_sends_exactly_once_and_only_after_reaching_majority`
+(cambio de gesto → un solo envío, y recién al alcanzar mayoría, verificado paso a
+paso) y `test_removing_the_hand_emits_release_event_after_the_configured_misses`
+(retirar la mano → evento de liberación en el tiempo configurado, no antes). Se
+agregó además `test_hand_present_but_ambiguous_noise_uses_the_long_release_threshold_not_the_fast_one`
+para blindar explícitamente la distinción de los dos umbrales.
+
+**Suite completa: 78 passed, 0 failed** (`.venv-fase-c2-fix/bin/pytest -q`,
+antes de esta corrección: 69).
+
+### Pendiente
+
+- Push de esta rama — bloqueado por credenciales, igual que siempre.
+- Autorización explícita de JD antes de tocar el `.venv` de producción o el
+  servicio real — nada de eso se hizo aquí.
+- El "latido periódico" para Fase 9 (punto 3) queda sin implementar, a propósito,
+  por falta de datos reales de requisitos de control continuo.
+- El umbral de liberación con mano ausente (punto 4) quedó con una mejora modesta,
+  no la agresiva que se había planteado al principio — una señal mejor que "cuadros
+  seguidos sin mano cruda" podría ajustarlo más en el futuro, con datos.
+
+## Fase D — plan de medición end-to-end contra AC3 (2026-10, PASO 1: revisado, sin ejecutar la medición todavía)
+
+Revisión externa de `fd3a288` (rama `fase-c2-fix-confirmed-output`): corrección
+aprobada, 78 tests confirmados. JD autorizó Fase D por el **camino A**: el cliente
+tiene el puerto fijo en 8766 (`DEFAULT_CVA_BRIDGE_PORT`, `reference/bridge.rs`), así
+que no se puede correr la instancia de prueba en otro puerto en paralelo — se
+necesita parar el servicio real un rato y correr la instancia de prueba en el mismo
+puerto, mientras dure la medición.
+
+**Esto es el plan, todavía NO ejecutado.** Documentado acá primero para revisión de
+JD antes de tocar el servicio real, por pedido explícito.
+
+**Revisión del plan (2026-10, después del commit `a77fadb`):** aprobado CON
+CAMBIOS. Los puntos 1-8 de abajo son los cambios pedidos, ya aplicados en este
+commit — **la medición en sí (Paso 2) sigue sin ejecutarse.**
+
+### Reglas fijas de esta fase
+
+1. El código que se mide sale de `fase-c2-fix-confirmed-output`, desde su propio
+   worktree (`~/video_analitica/cva-pi-repo-fase-c2-fix`) y su propio venv
+   (`.venv-fase-c2-fix`). La carpeta de producción
+   (`~/video_analitica/rasperry_pi-de-video-analitica`), su `.venv` y el archivo del
+   servicio no se tocan — nada de `git pull` ahí.
+2. La instancia de prueba la arranca Claude a mano, en el puerto 8766, **solo
+   mientras JD haya detenido el servicio real**. Los únicos comandos `sudo` los
+   corre JD: detener el servicio al empezar, volver a arrancarlo al terminar.
+3. Si aparece un defecto durante la medición, no se arregla en silencio — se
+   reporta primero, y el arreglo (si corresponde) va en un commit aparte con su
+   propio test, no mezclado con los datos de la medición.
+4. **Git, aclarado en la revisión del plan:** cualquier push de este trabajo va
+   únicamente a `origin/fase-c2-fix-confirmed-output` — nunca a `main` ni a
+   ninguna otra rama directamente desde acá. Fusionar a `main` (si corresponde,
+   cuando Fase D cierre) es un PR aparte, decisión de JD, igual que con Fase C2.
+
+### 1. Comandos exactos para JD (copiables, sin interpretación)
+
+**Al empezar — detener el servicio real y confirmar el puerto libre:**
+```bash
+sudo systemctl stop cva-gesture-bridge.service
+sudo ss -ltnp | grep 8766
+```
+Si el segundo comando **no imprime nada**, el puerto quedó libre — avísame y
+arranco la instancia de prueba. Si imprime algo, pégame la salida antes de seguir
+(no continuar sin confirmar esto).
+
+**Importante — orden de arranque del cliente:** JD abre su cliente real (el que se
+conecta por el túnel SSH a 8766) recién **DESPUÉS** de que yo confirme que la
+instancia de prueba ya está escuchando en 8766 (lo verifico con `ss`, igual que en
+el ensayo en seco de abajo). Abrirlo antes arriesga que el cliente haga su chequeo
+de salud (sección 4.2 de `CLAUDE.md`) contra un puerto todavía cerrado y falle la
+conexión.
+
+**Al terminar — reiniciar el servicio real (después de que yo confirme que la
+instancia de prueba ya se detuvo):**
+```bash
+sudo systemctl start cva-gesture-bridge.service
+sudo systemctl status cva-gesture-bridge.service --no-pager
+sudo ss -ltnp | grep 8766
+```
+El `status` debe decir `active (running)`, y el `ss` debe mostrar el PID del
+proceso real (el que corre desde
+`/home/david_cardenas/video_analitica/rasperry_pi-de-video-analitica/.venv/bin/python`,
+no desde el worktree de prueba). Pégame las tres salidas — las reviso contra el
+sistema real antes de dar la fase por cerrada (ver "Paso 3" más abajo), no me
+conformo con que los comandos se hayan corrido.
+
+**Plan de reversa, si algo de esto no sale limpio:**
+- Si `systemctl status` **no** dice `active (running)` después del `start`: JD
+  pega la salida completa de
+  ```bash
+  sudo journalctl -u cva-gesture-bridge -n 40 --no-pager
+  ```
+  para diagnosticar antes de reintentar nada a ciegas.
+- Si la instancia de prueba **no** cierra con `kill -INT <pid>` (SIGINT) en unos
+  segundos: forzar con `kill -KILL <pid>` (SIGKILL) y confirmar igual con
+  `ps -p <pid>` que ya no existe antes de pedirle a JD que reinicie el servicio
+  real — nunca dejar que el real arranque mientras la de prueba todavía podría
+  tener el puerto tomado.
+
+### 2. Cómo arranco la instancia de prueba
+
+```bash
+cd ~/video_analitica/cva-pi-repo-fase-c2-fix
+CVA_LOG_FILE=benchmarks/fase_d_run_<condicion>.log \
+  .venv-fase-c2-fix/bin/python -m cva_gesture_bridge.main
+```
+En segundo plano, guardando el PID. El archivo de log usa el formato ya existente
+del proyecto (`%(asctime)s %(levelname)s %(name)s: %(message)s`,
+`logging_setup.py`) — milisegundos por línea, sin cambios de código para esta
+fase.
+
+**Para detenerla limpio:** `kill -INT <pid>` (SIGINT, el mismo que Ctrl+C) — el
+`except KeyboardInterrupt` ya existente en `main.py` loguea
+"cva_gesture_bridge detenido por el usuario" y cierra ordenado. Confirmo que el
+proceso ya no existe (`ps -p <pid>`) antes de pedirle a JD que reinicie el
+servicio real.
+
+**Capturador temporal (opcional, para documentar casos difíciles sin tener que
+describirlos de memoria):** si hace falta, se activa con
+`CVA_CAPTURE_FRAMES_DIR=benchmarks/fase_d_frames_<condicion>` al arrancar — mismo
+mecanismo ya usado en Fase A/recaptura de meñique, gitignorado, nunca fotos reales
+al repo.
+
+**Ensayo en seco (corrido antes de pedirle nada a JD, puerto 8767 -- no toca
+producción ni el puerto real):**
+```
+$ CVA_BRIDGE_PORT=8767 CVA_LOG_FILE=benchmarks/fase_d_dry_run.log \
+    .venv-fase-c2-fix/bin/python -m cva_gesture_bridge.main &
+PID: 877256
+
+$ ss -ltnp | grep 8767
+LISTEN 0 100 0.0.0.0:8767 0.0.0.0:* users:(("python",pid=877256,fd=13))
+
+$ cat benchmarks/fase_d_dry_run.log
+2026-10-07 16:48:33,285 INFO __main__: Detector de gestos precalentado (warmup de arranque)
+2026-10-07 16:48:33,286 INFO cva_gesture_bridge.transport.tcp_server: cva_gesture_bridge escuchando en ('0.0.0.0', 8767)
+
+$ kill -INT 877256
+$ cat benchmarks/fase_d_dry_run.log   # línea nueva tras el SIGINT
+2026-10-07 16:48:42,234 INFO __main__: cva_gesture_bridge detenido por el usuario
+
+$ ps -p 877256
+    PID CMD        # (vacío -- confirmado, el proceso ya no existe)
+
+$ ss -ltnp | grep 8767   # (vacío -- puerto liberado)
+```
+Modelo cargado correctamente (`models/hand_landmarker.task` ya estaba en este
+worktree, copiado al armarlo en Fase B — no hizo falta copiarlo de nuevo ni
+versionarlo), warmup confirmado, cierre con SIGINT limpio y verificado contra el
+sistema real (`ps`, `ss`), no solo asumido. Log de este ensayo descartado después
+(gitignorado, `benchmarks/*.log`).
+
+### 3. Guion de medición con verdad conocida
+
+`benchmarks/fase_d_schedule.py` (ya escrito, no se importa desde el paquete) —
+imprime, con el reloj de la Pi (mismo formato de timestamp que el log del bridge,
+para poder cruzar las dos fuentes sin depender de sincronización entre máquinas),
+cuándo hacer cada gesto y cuándo quitar la mano. JD lo corre en una terminal SSH
+**aparte** de la que usa su cliente real, y sigue las señales en tiempo real
+mientras opera el cliente normalmente (la práctica real, por el túnel SSH, como
+siempre).
+
+- 4 gestos del catálogo × 10 repeticiones cada uno = 40 repeticiones, en bloques
+  (10 seguidas del mismo gesto, no intercaladas — más simple de analizar).
+- 3s sosteniendo cada gesto, **5s** con la mano fuera de cuadro entre cada
+  repetición (subido de 4s a 5s en la revisión del plan — margen real sobre
+  `GESTURE_RELEASE_AFTER_MISSES_NO_HAND=16` ≈ 2.3s, más margen de reacción humana
+  para sacar la mano Y volver a prepararla para la siguiente repetición).
+- Cada señal (`CUE:`) va precedida de un pitido audible (`\a`) además del texto —
+  más fácil de seguir sin tener que estar mirando la pantalla todo el tiempo.
+- Duración de una batería completa: ~40 × (3+5)s = 320s ≈ 5.3 min, más los 10s de
+  cuenta regresiva inicial.
+
+### 4. Qué se mide, con advertencia de método
+
+Dos tiempos distintos, reportados **por separado** — no promediados entre sí:
+
+- **Tiempo de sistema** (lo que de verdad evalúa AC3 <1.5s) — **corregido dos
+  veces, ver nota abajo**: se reproduce el `GestureStabilizer` real (se importa
+  la clase tal cual, no se reimplementa su lógica aparte) sobre la secuencia
+  cruda completa de observaciones (`[diag] Gesto candidato`/`[diag] Sin gesto
+  reconocido`, en orden, incluyendo `None`). En el momento exacto en que el
+  stabilizer real confirma, el tiempo de sistema es la distancia entre esa
+  confirmación y la observación MÁS ANTIGUA dentro de las últimas `window_size`
+  (7) observaciones evaluadas -- la ventana real que el propio algoritmo usó
+  para confirmar, no una racha continua ni la primera coincidencia aislada.
+  Esto mide el pipeline (MediaPipe + GestureStabilizer), no la reacción humana.
+
+  **Nota de corrección (2026-10, revisión externa):** la primera versión de
+  esta definición (todavía en revisión, nunca llegó a reportarse como
+  definitiva) medía la racha CONTINUA de candidatos del gesto correcto. Error
+  real: `GestureStabilizer` confirma con 5 coincidencias de 7 y TOLERA frames
+  intercalados (no exige racha exacta) — una racha continua subestima el
+  tiempo real cada vez que hubo ruido intercalado antes de la coincidencia más
+  antigua de la ventana real. Se encontró un caso imposible en los datos (una
+  repetición midió 85ms, pero 5 frames a ~7fps necesitan como mínimo ~572ms
+  entre el primero y el último) que confirmó el error antes de reportar nada
+  como cerrado. Ver "Fase D — Paso 2" más abajo para los valores reales
+  recalculados con el algoritmo real reproducido.
+- **Tiempo total desde la señal**: desde el timestamp de la línea `CUE: HAZ: X` del
+  guion hasta `Gesto detectado`. Incluye el tiempo que JD tarda en reaccionar y
+  mover la mano a posición — **no mide el sistema**, se reporta aparte y nunca se
+  usa para evaluar AC3, para no mezclar reacción humana con rendimiento real.
+
+**Regla de análisis — repeticiones CONTAMINADAS (agregada en la revisión del
+plan):** el bridge manda una línea de gesto solo cuando `confirmed_gesture`
+*cambia* respecto al último valor mandado (fix de Fase C2, ver esa sección de esta
+misma bitácora). Eso significa que si la liberación (`gesto: ninguno`) de la
+repetición anterior no llegó a tiempo o no llegó por algún motivo, la repetición
+siguiente del MISMO gesto puede confirmar correctamente por dentro sin generar
+ninguna línea nueva (porque ya "coincide" con lo último mandado) — verla sin línea
+de gesto no significa que el sistema falló en detectarla. **Toda repetición cuyo
+log no tenga un `gesto: ninguno` INMEDIATAMENTE ANTES de su tramo de `HAZ:` se
+marca CONTAMINADA y se excluye del % de aciertos** (no cuenta como acierto ni como
+fallo — queda fuera de la muestra, reportada aparte). Al analizar, reportar
+explícitamente cuántas repeticiones quedaron contaminadas por condición.
+
+Además, por repetición y en agregado (sobre las repeticiones NO contaminadas):
+- % de aciertos: gesto correcto confirmado **sin** haber mandado antes un gesto
+  equivocado en esa misma repetición (una repetición donde se manda el gesto
+  correcto pero precedido de un envío incorrecto NO cuenta como acierto limpio).
+- Líneas enviadas por repetición (esperado: 1 línea de gesto + 1 `gesto: ninguno`
+  al quitar la mano — más de eso es señal de un problema real, no de ruido
+  esperado, dado el fix de Fase C2).
+- Tiempo hasta `gesto: ninguno` tras retirar la mano (debería rondar el valor real
+  medido para `GESTURE_RELEASE_AFTER_MISSES_NO_HAND`, ~2.3s, más el margen que
+  tome MediaPipe en reportar "sin mano" de verdad).
+- Cero líneas durante los tramos de "mano fuera de cuadro" (aparte de la única
+  `gesto: ninguno` esperada al principio de cada tramo).
+
+### 5. Condiciones
+
+- **3 distancias**, medidas con cinta métrica y anotadas en cm exactos antes de
+  empezar cada batería: cerca, media, lejos (JD define los valores concretos al
+  momento, documentados en el reporte final, no fijados de antemano a ciegas).
+- **Segunda persona, de tono de piel distinto, si JD consigue una** — misma
+  batería completa. **Si no la consigue, se documenta explícitamente como brecha
+  abierta** en el reporte final (no se cierra en silencio ni se asume cubierta).
+
+### 6. Casos difíciles — resultado esperado definido ANTES de probar
+
+| caso | resultado esperado |
+|---|---|
+| Movimiento rápido (cambiar de gesto rápido, sin sostener) | No debe confirmarse ningún gesto incorrecto — puede no confirmar nada (aceptable), pero cero envíos equivocados. |
+| Mano tapada a medias | Puede no confirmar el gesto real (aceptable) — pero cero envíos de un gesto distinto al que se intenta. |
+| Mano en el borde del cuadro | Igual que arriba: aceptable no confirmar, inaceptable confirmar algo incorrecto. |
+| Dos manos en cuadro | El detector usa `num_hands=1` (detector.py) — debe seguir tratando una sola mano sin crashear; se documenta cuál de las dos eligió MediaPipe, sin asumir que es un bug si elige la "equivocada" (no hay forma de indicarle cuál priorizar en esta fase). |
+| Una persona pasando detrás | Cero gestos confirmados por la persona de fondo — mismo criterio que los fixtures de cara/torso de Fase B (geométricamente no debe calzar con ningún patrón del catálogo). |
+
+### 7. Qué hace JD y cuánto dura cada bloque
+
+1. **Preparación** (~2 min): correr los 2 comandos de "detener servicio" de la
+   sección 1, confirmar puerto libre, avisarme.
+2. **Batería principal** (~5 min × 3 distancias ≈ 15 min): por cada distancia,
+   JD corre `fase_d_schedule.py <distancia>` en una terminal SSH aparte, sigue las
+   señales con su cliente real abierto y operando normalmente.
+3. **Segunda persona** (~15 min adicionales, si aplica): misma batería completa.
+4. **Casos difíciles** (~5-10 min): JD improvisa cada caso de la tabla de arriba
+   cuando se lo pida, sin guion cronometrado (son puntuales, no repeticiones).
+5. **Cierre** (~2 min, checklist):
+   - [ ] Confirmo que mi instancia de prueba ya no tiene proceso corriendo.
+   - [ ] JD corre los 3 comandos de "reiniciar servicio" de la sección 1.
+   - [ ] Reviso las 3 salidas contra el sistema real (PID, puerto, estado) antes
+         de dar la fase por cerrada.
+
+### Limitaciones de esta medición (agregado en la revisión del plan)
+
+- **La medición llega solo hasta el envío desde la Pi** — mide desde que el frame
+  entra al detector hasta que `TcpServer.send_line` escribe en el socket. **No
+  incluye** el tiempo de red del túnel SSH hasta la máquina de JD, ni el tiempo
+  que tarda el cliente en leer la línea y pintarla en pantalla. El AC3 real
+  "de punta a punta, visible para el estudiante" es por lo tanto siempre
+  **mayor o igual** al tiempo de sistema medido acá, nunca menor.
+- **`Gesto detectado` en el log es un proxy de "línea enviada", no una garantía.**
+  Caso borde real (ver `main.py`): el log "Gesto detectado" se escribe apenas el
+  `GestureStabilizer` confirma, ANTES de chequear si `confirmed_confidence` supera
+  `MIN_CONFIDENCE` — si no la supera, `format_line` devuelve `None` y nunca se
+  llama a `send_line`, aunque el log ya haya dicho "Gesto detectado". Con los
+  datos reales medidos hasta ahora las confianzas rondan 0.9-1.0 y `MIN_CONFIDENCE`
+  es 0.5 (margen amplio, este caso no se ha visto en la práctica) — pero si al
+  analizar aparece un "Gesto detectado" sin la línea `gesto: X` correspondiente
+  en el tráfico real, es este caso borde, no un bug nuevo.
+
+### Pendiente de aprobación
+
+Este plan está escrito, no ejecutado. Falta la aprobación explícita de JD sobre
+este documento antes de pasar al Paso 2 (ejecutar con JD, analizar, documentar
+resultados reales con tabla por condición).
+
+**Aprobado por JD (con los 8 cambios del commit `e35f3be`).** Paso 2 ejecutado
+parcialmente el 2026-10-07/08 — ver resultados abajo.
+
+## Fase D — Paso 2: resultados reales (2026-10-07/08, condición 50cm)
+
+Instancia de prueba arrancada en el puerto 8766 (servicio real detenido por JD,
+puerto verificado libre antes de arrancar — `systemctl is-active` dio `inactive`,
+`ss -ltn` sin ninguna coincidencia para 8766, confirmado independientemente, no
+solo de palabra). Cliente real de JD conectado por el túnel SSH de siempre,
+practicando con el módulo CVA normalmente.
+
+**Primer intento (sin seguir el guion):** JD probó los 4 gestos libremente frente
+al cliente real antes de correr `fase_d_schedule.py` — sirvió como chequeo rápido
+de que la cadena completa funciona (los 4 gestos se reconocieron con confianza
+alta), pero no sigue el guion con verdad conocida, así que no se usó para los
+números de abajo.
+
+**Segundo intento (guion completo, pero con 1 repetición perdida):** JD corrió el
+guion inmediatamente después del chequeo libre, sin pausa — la transición desde
+la actividad anterior se "comió" la primera repetición (puño_cerrado): quedó
+confirmada por el `GestureStabilizer` pero el bridge nunca mandó una línea nueva
+porque ya coincidía con lo último confirmado de la prueba libre anterior (ver la
+regla de repeticiones CONTAMINADAS de la sección 4 de este plan — exactamente el
+caso que esa regla anticipaba). Resultado: 39 de 40 repeticiones con línea
+propia, 0 contaminadas de esas 39, 0 fuera de AC3 — pero JD prefirió repetir
+completo para tener las 40 limpias en vez de aceptar el 39/40.
+
+**Repetición, condición 50cm (medido con cinta), la que se reporta:** esta vez con
+una pausa de ~3-4s con la mano fuera de cuadro antes de arrancar el guion, para
+que no arrastrara nada de la prueba anterior. 40 de 40 repeticiones con línea
+propia, 0 contaminadas.
+
+**Corrección (revisión externa de `c292efe`):** la tabla original de esta sección
+afirmaba "100% de aciertos (40/40)", "exactamente 2 líneas por repetición" y "0
+líneas durante los tramos sin mano" — **ninguna de esas tres estaba respaldada
+por un cómputo real.** `analyze_fase_d_run.py` nunca comparó contra la señal del
+guion (el CUE no se guardó, ver más abajo), así que no hay forma de verificar
+"precisión contra verdad conocida" con este log solo. Reescrito con lo que sí se
+pudo verificar realmente:
+
+| métrica | valor | ¿cómo se verificó? |
+|---|---|---|
+| Repeticiones totales (eventos "Gesto detectado") | 40 | conteo directo del log |
+| Repeticiones contaminadas (regla de la sección 4) | 0 | `analyze_fase_d_run.py` |
+| Tiempo de sistema — avg / p50 / p95 / max / min | 543ms / 543ms / 596ms / **763ms** / 417ms | `analyze_fase_d_run.py`, `GestureStabilizer` real reproducido (ver corrección de método, sección 4) |
+| Repeticiones que superan AC3 (<1500ms) | **0/40** | `analyze_fase_d_run.py` |
+| Tiempo detectado→liberado — avg / min / max | 4494ms / 4156ms / 5902ms | `analyze_fase_d_run.py` (desde la detección, NO desde la señal QUITA del guion — ver nota de método abajo) |
+| Secuencia de eventos | estrictamente alternada `detectado, liberado, detectado, liberado...` (80 eventos, 40 pares), sin excepciones | verificado por script aparte, pegado abajo |
+
+**Lo que esto SÍ dice, con precisión:** 40 gestos quedaron confirmados y
+mostrados, cada uno detectado exactamente una vez, sin ningún envío adicional o
+fuera de secuencia (la alternancia estricta D-L-D-L lo confirma mecánicamente).
+**Lo que esto NO dice:** si esos 40 gestos coinciden con los 40 que el guion
+realmente pidió, en el orden y momento que los pidió — **la precisión contra
+verdad conocida NO está verificada**, porque el CUE del guion solo se imprimió en
+la pantalla de JD y no se guardó en ningún archivo (ver limitación ya documentada
+en la sección 4 del plan). Verificación de la alternancia:
+
+```
+$ python3 -c "... cuenta eventos D/L en orden ..."
+secuencia: DLDLDLDLDLDLDLDLDLDLDLDLDLDLDLDLDLDLDLDLDLDLDLDLDLDLDLDLDLDLDLDLDLDLDLDLDLDLDLDL
+longitud: 80
+alterna estrictamente D,L,D,L...: True
+```
+
+**Tabla "Detalle por repetición" completa (las 40), salida real de
+`analyze_fase_d_run.py` con el `GestureStabilizer` real reproducido (corregido
+dos veces, ver nota de método en la sección 4 del plan):**
+
+```
+  [  144] 13:43:50,444 puño_cerrado   conf=0.99 t_sistema=    555ms
+  [  203] 13:43:58,578 puño_cerrado   conf=1.00 t_sistema=    511ms
+  [  262] 13:44:06,745 puño_cerrado   conf=1.00 t_sistema=    522ms
+  [  321] 13:44:14,884 puño_cerrado   conf=1.00 t_sistema=    532ms
+  [  380] 13:44:23,069 puño_cerrado   conf=1.00 t_sistema=    596ms
+  [  434] 13:44:30,496 puño_cerrado   conf=1.00 t_sistema=    530ms
+  [  493] 13:44:38,646 puño_cerrado   conf=1.00 t_sistema=    588ms
+  [  551] 13:44:46,658 puño_cerrado   conf=1.00 t_sistema=    581ms
+  [  608] 13:44:54,533 puño_cerrado   conf=1.00 t_sistema=    549ms
+  [  666] 13:45:02,512 puño_cerrado   conf=1.00 t_sistema=    496ms
+  [  727] 13:45:10,982 palma_abierta  conf=0.96 t_sistema=    514ms
+  [  782] 13:45:18,516 palma_abierta  conf=0.98 t_sistema=    553ms
+  [  840] 13:45:26,538 palma_abierta  conf=0.98 t_sistema=    510ms
+  [  898] 13:45:34,523 palma_abierta  conf=0.98 t_sistema=    479ms
+  [  955] 13:45:42,551 palma_abierta  conf=0.96 t_sistema=    528ms
+  [ 1011] 13:45:50,558 palma_abierta  conf=0.98 t_sistema=    543ms
+  [ 1071] 13:45:58,833 palma_abierta  conf=0.97 t_sistema=    543ms
+  [ 1128] 13:46:06,735 palma_abierta  conf=0.98 t_sistema=    555ms
+  [ 1184] 13:46:14,495 palma_abierta  conf=0.97 t_sistema=    582ms
+  [ 1243] 13:46:22,659 palma_abierta  conf=0.99 t_sistema=    579ms
+  [ 1301] 13:46:30,636 palma_abierta  conf=0.98 t_sistema=    551ms
+  [ 1362] 13:46:39,046 dedo_pulgar    conf=0.98 t_sistema=    518ms
+  [ 1416] 13:46:46,487 dedo_pulgar    conf=0.92 t_sistema=    544ms
+  [ 1474] 13:46:54,480 dedo_pulgar    conf=1.00 t_sistema=    488ms
+  [ 1531] 13:47:02,336 dedo_pulgar    conf=0.98 t_sistema=    513ms
+  [ 1595] 13:47:11,211 dedo_pulgar    conf=0.97 t_sistema=    525ms
+  [ 1648] 13:47:18,500 dedo_pulgar    conf=0.96 t_sistema=    461ms
+  [ 1707] 13:47:26,664 dedo_pulgar    conf=0.99 t_sistema=    536ms
+  [ 1765] 13:47:34,652 dedo_pulgar    conf=0.99 t_sistema=    490ms
+  [ 1822] 13:47:42,563 dedo_pulgar    conf=0.93 t_sistema=    558ms
+  [ 1879] 13:47:50,540 dedo_pulgar    conf=0.98 t_sistema=    470ms
+  [ 1937] 13:47:58,562 dedo_menique   conf=1.00 t_sistema=    594ms
+  [ 1995] 13:48:06,535 dedo_menique   conf=1.00 t_sistema=    579ms
+  [ 2054] 13:48:14,696 dedo_menique   conf=1.00 t_sistema=    763ms
+  [ 2111] 13:48:22,567 dedo_menique   conf=1.00 t_sistema=    511ms
+  [ 2168] 13:48:30,562 dedo_menique   conf=1.00 t_sistema=    417ms
+  [ 2226] 13:48:38,593 dedo_menique   conf=1.00 t_sistema=    579ms
+  [ 2284] 13:48:46,618 dedo_menique   conf=1.00 t_sistema=    591ms
+  [ 2341] 13:48:54,653 dedo_menique   conf=1.00 t_sistema=    617ms
+  [ 2396] 13:49:02,488 dedo_menique   conf=1.00 t_sistema=    571ms
+
+=== Resumen ===
+Confirmaciones reproducidas con el GestureStabilizer real: 40 (coincide exacto
+con las 40 líneas "Gesto detectado" reales -- cero desajustes de gesto, cero
+avisos de cantidad)
+Tiempo de sistema -- avg=543ms p50=543ms p95=596ms max=763ms min=417ms
+Repeticiones que superan AC3 (<1500ms): 0/40
+
+Ningún valor cae por debajo de ~400ms (el piso teórico para 5 coincidencias a
+~7fps) -- la corrección eliminó el valor imposible (85ms) sin introducir otros
+nuevos. El valor más bajo real es 417ms ([2168], dedo_menique), consistente con
+el piso teórico.
+
+Tiempo detectado->liberado -- n=40 avg=4494ms min=4156ms max=5902ms
+
+Repeticiones NO contaminadas por gesto: {'puño_cerrado': 10, 'palma_abierta': 11, 'dedo_pulgar': 10, 'dedo_menique': 9}
+```
+
+**Nota de conteo (10/11/10/9 en vez de 10/10/10/10) — HIPÓTESIS, no hecho
+confirmado, pero con evidencia adicional que inclina hacia una de las dos.**
+
+**Análisis por posición (agregado en la revisión):** comparando la secuencia
+real de 40 gestos contra el orden canónico del guion (10 puño + 10 palma + 10
+pulgar + 10 meñique), **las únicas dos posiciones donde difieren son la 21 y la
+31** — ambas justo donde empezaría el bloque siguiente si el real tuviera 10 en
+cada uno (posición 21 real=`palma_abierta`, esperado=`dedo_pulgar`; posición 31
+real=`dedo_pulgar`, esperado=`dedo_menique`). Además, el tiempo total entre la
+primera y la última detección es 312.044s, y 39 intervalos × 8s = 312s exacto —
+**ninguna de las 39 transiciones entre detecciones tiene un hueco irregular**,
+tampoco en los bordes entre bloques. Esto es consistente con una sola inserción
+contigua de repeticiones extra de `palma_abierta` (no un evento disperso o
+duplicado en otro punto de la secuencia).
+
+1. **Error humano de ejecución** (JD hizo una repetición de más de
+   `palma_abierta`, o se adelantó/atrasó un conteo propio en la transición). A
+   favor: los 11 espaciados entre detecciones de `palma_abierta` son
+   perfectamente regulares (~8s cada uno) — 11 ciclos completos y limpios, no
+   un artefacto de un solo evento duplicado. Y, revisando el final real del
+   bloque de meñique (después de la 9ª y última detección, 13:49:02 en
+   adelante): el flujo crudo muestra **solo "Sin gesto reconocido" durante
+   ~10 segundos seguidos**, hasta que la conexión del cliente se cierra
+   (`Conexión... finalizada`) — **cero candidatos de cualquier gesto** en esa
+   ventana, ni uno débil ni uno mal clasificado. No hay ningún indicio de que
+   se haya intentado una 10ª repetición de meñique, ni exitosa ni fallida.
+2. **Clasificación incorrecta** (un intento real de `dedo_menique` leído como
+   `palma_abierta`). Investigadas **las dos ventanas relevantes** (la revisión
+   anterior solo había mirado una, la equivocada: un meñique mal leído
+   aparecería cronológicamente en el bloque/tiempo de meñique, no mezclado
+   dentro del bloque de palma, que ocurre minutos antes): ni la ventana
+   completa alrededor de las 11 detecciones de palma (13:46:14-13:46:45) ni el
+   final del bloque de meñique (13:49:02 en adelante, ver punto 1) muestran
+   **ningún** candidato cruzado de un gesto en el bloque del otro.
+
+**Con esto, la hipótesis 1 (error humano de ejecución) queda mejor respaldada
+que la 2 (clasificación incorrecta) — pero sigue sin confirmación directa (no
+hay CUE guardado de esta corrida, ver limitación ya documentada) y queda
+pendiente que JD la confirme o la corrija.** La suma total (40) y la secuencia
+alternada D-L-D-L no cambian por esto.
+
+**Segunda persona / otras distancias / casos difíciles: pendientes — brecha
+abierta, no cerrada.** JD y Claude decidieron cerrar esta sesión después de la
+condición 50cm (el servicio real llevaba ~21 horas detenido, priorizar
+restaurarlo sobre seguir midiendo). El resto de condiciones del plan (media,
+lejos, segunda persona de otro tono de piel, los 5 casos difíciles de la sección
+6) queda para una sesión nueva de Fase D, repitiendo el mismo procedimiento.
+
+### Cierre de esta sesión — verificado contra el sistema real
+
+```
+$ pgrep -f "cva_gesture_bridge.main"
+878539   # (antes de apagar)
+
+$ kill -INT 878539
+$ ps -p 878539
+# vacío -- confirmado, el proceso ya no existe
+
+$ ss -ltn | grep 8766
+# vacío -- puerto liberado
+```
+Recién después de esta verificación se le avisó a JD para que reiniciara el
+servicio real (`sudo systemctl start cva-gesture-bridge.service`).
+
+### Scripts de esta sesión
+
+`benchmarks/analyze_fase_d_run.py` (nuevo) — parsea un log real del bridge de
+prueba y aplica las reglas del plan (tiempo de sistema desde la racha continua de
+`[diag] Gesto candidato`, repeticiones contaminadas, tiempo de liberación). No se
+importa desde el paquete.
+
+**Corrección (revisión externa):** `fase_d_schedule.py` no guardaba ningún
+archivo (solo imprimía a pantalla) — por eso la corrida de 50cm no pudo
+verificar nada contra la señal real del guion. Ahora guarda siempre las señales
+en `benchmarks/fase_d_cue_<condición>.log` (mismo formato de timestamp que el
+log del bridge). `analyze_fase_d_run.py` acepta ese archivo como segundo
+argumento opcional y, cuando está presente, calcula el tiempo de liberación
+real **desde la señal QUITA** (no desde la propia detección, que es lo único
+medible sin esa señal) y el tiempo total desde la señal HAZ — emparejado por
+orden, con aviso explícito si los conteos no coinciden en vez de alinear a
+ciegas. Probado con datos sintéticos antes de usarlo (ver commit) — esta
+corrida de 50cm no tiene CUE guardado (se grabó antes de este fix), así que
+estas dos métricas quedan disponibles recién para la próxima sesión de Fase D.
+
+### Defecto real encontrado al restaurar producción — reportado y corregido con su test
+
+Al reiniciar el servicio real después de cerrar la sesión de medición, JD había
+hecho `git pull` de `main` en producción en algún momento (trae el merge de Fase
+B/C2, confirmado: `9a249fa`) **sin actualizar el `.venv` de producción ni
+descargar el modelo** — `ModuleNotFoundError: No module named 'mediapipe'` y
+`models/` inexistente. Autorizado por JD, corregido (`.venv/bin/pip install -r
+requirements.txt` + copiar `hand_landmarker.task`) — esto solo, sin tocar código.
+
+**Tras corregir eso, apareció un segundo problema real, de código esta vez — no
+solo de despliegue.** El servicio seguía crasheando en bucle de reinicio
+(`systemctl` mostraba `activating (auto-restart)`, puerto 8766 nunca llegaba a
+escuchar). `sudo journalctl -u cva-gesture-bridge -n 60 --no-pager` (pedido a JD,
+sin acceso propio a journalctl) mostró la causa real:
+
+```
+sounddevice.PortAudioError: Error initializing PortAudio: Unanticipated host
+error [PaErrorCode -9999]: 'PulseAudio_Initialize: Can't connect to server'
+```
+con el traceback completo pasando por
+`mediapipe/__init__.py` → `mediapipe.tasks.python` → `audio` → `audio_classifier`
+→ `audio_record` → `import sounddevice` (que inicializa PortAudio en el momento
+mismo del import, no de forma perezosa).
+
+**Por qué no se había visto esto en ninguna prueba anterior** (Fase B, C2, ni los
+ensayos en seco de esta misma Fase D): todas esas pruebas corrieron desde una
+sesión interactiva por SSH, que sí tiene una sesión de PulseAudio de usuario
+alcanzable. `cva-gesture-bridge.service` es una unidad de *sistema* de systemd
+(no de usuario) — no tiene ninguna sesión de audio asociada, así que
+`sounddevice` falla ahí aunque funcione perfecto en una terminal interactiva.
+Esto nunca se habría encontrado sin medir contra el servicio real -- exactamente
+el tipo de cosa que Fase D existe para descubrir.
+
+**Arreglo** (`cva_gesture_bridge/vision/detector.py`): este proyecto nunca usa
+ninguna función de audio de mediapipe (solo `vision.HandLandmarker`) — pero
+`mediapipe.tasks.python.__init__.py` importa su submódulo de audio
+incondicionalmente, sin forma de evitarlo desde afuera sin tocar la librería.
+`_stub_sounddevice_if_unavailable()` intenta el import real de `sounddevice`
+primero; **solo si ese import real falla**, instala un módulo en blanco en
+`sys.modules["sounddevice"]` antes de importar mediapipe, para que la cadena de
+imports de `mediapipe.tasks.python` encuentre ese stub en vez de ejecutar el
+archivo real de `sounddevice.py` (que es donde se dispara la inicialización de
+PortAudio). Si el import real SÍ funciona (como en toda sesión interactiva hasta
+ahora), no se toca nada — el stub nunca oculta un fallo real de audio en un
+entorno donde sí hay sesión disponible, porque ninguna parte de este proyecto usa
+audio para nada.
+
+**3 tests nuevos** en `tests/test_detector.py` (stub se instala cuando el import
+real falla de verdad -- simulado forzando `OSError` en `builtins.__import__` solo
+para el nombre `sounddevice`, no con un valor en `sys.modules` que habría
+disparado el chequeo de salida temprana de la función por otro motivo; stub NO se
+instala cuando el import real funciona; la función no pisa un `sounddevice` que
+ya estuviera importado de antes). **Suite completa: 81 passed, 0 failed**
+(antes de este fix: 78).
+
+**Corrección (revisión externa de `c292efe`) a estos 3 tests:**
+`test_stub_not_installed_when_real_sounddevice_import_succeeds` dependía de que
+ESTA máquina tuviera audio disponible de verdad (justo la condición que el
+incidente de producción demostró que varía según el contexto) — reescrito para
+simular un import real exitoso con un módulo falso (mismo mecanismo de
+`builtins.__import__`, pero devolviendo un módulo con `__file__` en vez de
+levantar una excepción), ya no depende del entorno. Además, el primer test dejaba
+el stub en blanco pegado en `sys.modules["sounddevice"]` después de correr
+(la función lo muta directamente, no vía `monkeypatch`, así que no se deshacía
+solo) — ahora se guarda el valor original antes y se restaura en un `finally`.
+
+**Verificación bajo condiciones reales del servicio (pedida en la revisión,
+antes de dar el fix por bueno):** el entorno interactivo por SSH tiene
+`XDG_RUNTIME_DIR` y `DBUS_SESSION_BUS_ADDRESS` seteados (confirmado con `env |
+grep`) — justo lo que una unidad de *sistema* de systemd no tiene. Se construyó
+un entorno restringido con `env -i HOME=... PATH=...` (sin esas dos variables ni
+`PULSE_SERVER`) para reproducir la condición real sin tocar el servicio real:
+
+```
+$ env -i HOME="$HOME" PATH="$PATH" .venv-fase-c2-fix/bin/python -c "import mediapipe"
+...
+sounddevice.PortAudioError: Error initializing PortAudio: Unanticipated host
+error [PaErrorCode -9999]: 'PulseAudio_Initialize: Can't connect to server'
+```
+**El bug reproduce exacto** (mismo error que journalctl mostró en producción) en
+este entorno restringido, sin el fix. Con el fix (`GestureDetector` real,
+construido y corriendo `detect()` contra un fixture real, mismo entorno
+restringido):
+
+```
+$ env -i HOME="$HOME" PATH="$PATH" .venv-fase-c2-fix/bin/python -c "..."
+OK: GestureDetector se construyo correctamente (con el fix) en entorno sin
+XDG_RUNTIME_DIR/DBUS_SESSION_BUS_ADDRESS/PULSE_SERVER
+OK: detect() corrio sobre un fixture real -- gesture=puño_cerrado confidence=0.9983
+```
+
+**Estado del fix en producción:** ya se aplicó como hotfix directo (autorizado
+por JD, antes de que llegara esta revisión) mientras el servicio real estaba
+caído — commit local `4a4f793` en el `main` de producción, servicio verificado
+`active (running)` escuchando en 8766.
+
+**Investigación de reconciliación (2026-10, revisión externa, SOLO LECTURA en
+la carpeta de producción — nada de lo siguiente modificó nada ahí):**
+
+```
+$ git status
+En la rama main
+Tu rama está adelantada a 'origin/main' por 1 commit.
+nada para hacer commit, el árbol de trabajo está limpio
+
+$ git log --oneline -5
+4a4f793 Hotfix directo: evitar crash real de mediapipe/sounddevice en el servicio
+9a249fa Merge pull request #2 from JJuan55/fase8-fase-b-mediapipe-pipeline
+afe5f7b Fase C2: eliminar cooldown y rediseñar confirmación con histéresis, medido con datos reales
+d075665 Reemplazar fixture de dedo_menique con un frame sin ambigüedad visual
+e4811e6 Fase B: reemplazar YOLO+OpenCV por MediaPipe HandLandmarker en detector.py
+
+$ git log origin/main..HEAD --stat
+commit 4a4f793... (el hotfix)
+ cva_gesture_bridge/vision/detector.py | 24 ++++++++++++++++++++++++
+ 1 file changed, 24 insertions(+)
+```
+
+**Confirmado: el commit local `4a4f793` contiene SOLO el parche de audio** (24
+líneas agregadas, 0 borradas, un solo archivo) — ningún otro cambio colado,
+árbol de trabajo limpio, nada más pendiente de commitear ahí.
+
+```
+$ git diff 4a4f793 fase-c2-fix-confirmed-output -- cva_gesture_bridge/vision/detector.py
+```
+El diff completo (pegado en el commit de este análisis) muestra que la función
+`_stub_sounddevice_if_unavailable` es **funcionalmente idéntica** en ambos lados
+(misma firma, misma lógica, mismo comportamiento) — la única diferencia es que
+la rama tiene un docstring más largo (explica el hallazgo con más detalle). El
+resto del diff es TODO contenido que la rama tiene y producción todavía no: las
+dos correcciones de Fase C2 (`confirmed_confidence`, histéresis de dos
+umbrales, firma nueva de `format_line`) que llegaron en commits posteriores al
+hotfix.
+
+**Qué le pasaría a un `git pull` del `main` fusionado, sin ejecutarlo:**
+`git pull` (= `fetch` + `merge`) sobre una rama con un commit local que
+diverge (`4a4f793`) hace un merge de 3 vías contra el ancestro común (`9a249fa`).
+Ambos lados agregaron una función con el mismo nombre, en el mismo lugar del
+archivo, con contenido casi idéntico pero no byte-a-byte igual (el docstring
+difiere) — esto es exactamente el tipo de situación donde un merge de git
+**puede** resolverse solo o **puede** marcar conflicto, dependiendo de cómo
+calce el algoritmo de diff de 3 vías con el contexto alrededor; no se puede
+afirmar con certeza cuál de las dos pasaría sin probarlo de verdad, y esta
+instrucción fue solo lectura, así que no se probó.
+
+**Procedimiento de reconciliación propuesto (NO ejecutado) — dos caminos:**
+
+- **Camino A, recomendado:** dado que el árbol de trabajo está limpio y todo el
+  contenido de `4a4f793` queda subsumido por lo que trae la rama (el mismo
+  parche, más otras correcciones), una vez el PR esté fusionado en GitHub:
+  ```bash
+  git fetch origin
+  git reset --hard origin/main
+  ```
+  Esto evita por completo el riesgo de conflicto de arriba — descarta el
+  commit local `4a4f793` (ya no hace falta, su contenido está incluido en lo
+  que llega) y deja producción apuntando exacto al nuevo `origin/main`. Es un
+  `reset --hard`, una operación que descarta commits locales — segura acá
+  específicamente porque (a) el árbol de trabajo ya está limpio (confirmado
+  arriba, no hay nada sin commitear que se pueda perder) y (b) el único commit
+  local que se descarta es un duplicado funcional de algo que ya viene en la
+  fusión, no trabajo que se perdería de verdad. **Aun así, requiere
+  autorización explícita de JD antes de correrlo, igual que cualquier otro
+  cambio en producción** — no se ejecuta solo porque parezca seguro.
+- **Camino B, alternativo:** `git pull origin main` normal, y si marca
+  conflicto en `detector.py`, resolverlo a mano aceptando el contenido de la
+  rama entrante (`--theirs` en esa región, o editar a mano) ya que es un
+  superconjunto estricto del commit local. Más pasos, mismo resultado final,
+  sin el riesgo de reset-hard si JD prefiere mantener el historial de merge
+  explícito en vez de reescribirlo.
+
+Ninguno de los dos se ejecutó — queda pendiente de que JD decida cuál prefiere,
+y de la fusión real del PR primero.

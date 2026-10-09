@@ -69,13 +69,33 @@ GESTURE_COOLDOWN_SECONDS = float(os.environ.get("CVA_GESTURE_COOLDOWN_SECONDS", 
 # GESTURE_STABILITY_WINDOW/MIN_MATCHES (5 de 7, ~71%) controlan CONFIRMAR un gesto
 # nuevo -- con cooldown≈0 y ~143ms real entre frames del cliente, eso es ~715ms en
 # el caso típico, dentro de AC3 (<1.5s) con margen real medido (ver "Simulación de
-# tiempo de confirmación" en BITACORA.md). GESTURE_RELEASE_AFTER_MISSES controla
-# SOLTAR un gesto ya confirmado (histéresis): no se suelta por una racha corta de
-# ruido, solo tras esa cantidad de observaciones seguidas que no sean el gesto
-# confirmado -- el default (20) deja margen real sobre el peor caso medido (14).
+# tiempo de confirmación" en BITACORA.md).
+#
+# SOLTAR un gesto ya confirmado (histéresis) usa DOS umbrales distintos desde la
+# corrección de 2026-10 (ver BITACORA.md "Fase C2 — corrección antes de Fase D"):
+# con un solo umbral largo, retirar la mano de cuadro dejaba un "gesto fantasma"
+# confirmado ~2.7s de más (20 misses × ~143ms), un problema real si esto llega a
+# controlar un actuador.
+#
+# La intuición inicial ("sin mano no hay ambigüedad, se puede soltar casi de
+# inmediato") NO se sostuvo contra los datos reales (benchmarks/
+# inspect_noise_by_hand_presence.py, los mismos 40 tramos sostenidos): dentro de un
+# gesto genuinamente sostenido, el ruido de "mano ausente" (MediaPipe pierde el
+# tracking un instante, p.ej. por un micro-ajuste de la mano) también tiene rachas
+# largas -- la máxima medida fue 13 frames seguidos, casi igual que la máxima de
+# "mano presente pero ambigua" (14). Un umbral corto (ej. 3) para
+# GESTURE_RELEASE_AFTER_MISSES_NO_HAND habría soltado gestos reales sostenidos por
+# error. Los dos umbrales quedaron con margen real sobre su propio peor caso
+# medido, no con una asimetría grande: GESTURE_RELEASE_AFTER_MISSES=20 (margen
+# sobre 14) y GESTURE_RELEASE_AFTER_MISSES_NO_HAND=16 (margen sobre 13) -- una
+# mejora real pero modesta (2.86s -> 2.29s en el caso de mano retirada de verdad),
+# no la mejora grande que la intuición inicial sugería. Documentado como trade-off
+# explícito, no resuelto a fondo: una liberación más rápida todavía podría valer la
+# pena para Fase D si se mide con una señal mejor que "cuadros seguidos sin mano".
 GESTURE_STABILITY_WINDOW = int(os.environ.get("CVA_GESTURE_STABILITY_WINDOW", "7"))
 GESTURE_STABILITY_MIN_MATCHES = int(os.environ.get("CVA_GESTURE_STABILITY_MIN_MATCHES", "5"))
 GESTURE_RELEASE_AFTER_MISSES = int(os.environ.get("CVA_GESTURE_RELEASE_AFTER_MISSES", "20"))
+GESTURE_RELEASE_AFTER_MISSES_NO_HAND = int(os.environ.get("CVA_GESTURE_RELEASE_AFTER_MISSES_NO_HAND", "16"))
 
 # CAPTURADOR TEMPORAL (2026-09-25, ver BITACORA.md "Fase 8" / spike MediaPipe) — banco
 # de frames reales para el spike, autorizado por JD explícitamente, con fecha de

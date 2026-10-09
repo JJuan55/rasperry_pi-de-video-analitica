@@ -48,12 +48,14 @@ def main():
         print(f"=== {session} ({len(paths)} frames) ===", flush=True)
         gestures = []
         confidences = []
+        extended_fingers_list = []
         for i, p in enumerate(paths):
             with open(p, "rb") as f:
                 jpeg = f.read()
             r = detector.detect(jpeg)
             gestures.append(r.gesture)
             confidences.append(round(r.confidence, 4))
+            extended_fingers_list.append(r.extended_fingers)
             if (i + 1) % 1000 == 0:
                 print(f"  {i + 1}/{len(paths)}", flush=True)
         # timestamp_ms esta en el propio nombre de archivo -- lo extraemos para poder
@@ -64,6 +66,7 @@ def main():
             "timestamps_ms": timestamps_ms,
             "gestures": gestures,
             "confidences": confidences,
+            "extended_fingers": extended_fingers_list,
         }
 
     with open(OUT_PATH, "w") as f:
