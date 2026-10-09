@@ -2095,24 +2095,114 @@ una pausa de ~3-4s con la mano fuera de cuadro antes de arrancar el guion, para
 que no arrastrara nada de la prueba anterior. 40 de 40 repeticiones con línea
 propia, 0 contaminadas.
 
-| métrica | valor |
-|---|---|
-| Repeticiones totales | 40/40 (10 puño_cerrado, 11 palma_abierta, 10 dedo_pulgar, 9 dedo_menique — ver nota de conteo abajo) |
-| Repeticiones contaminadas | 0 |
-| % de aciertos (gesto correcto, sin envío equivocado antes) | 100% (40/40) |
-| Tiempo de sistema — avg / p50 / p95 / max | 526ms / 543ms / 594ms / **617ms** |
-| Repeticiones que superan AC3 (<1500ms) | **0/40** |
-| Tiempo detectado→liberado — avg / min / max | 4494ms / 4156ms / 5902ms |
-| Líneas enviadas por repetición | exactamente 2 (1 gesto + 1 liberación), sin excepciones |
-| Líneas durante los tramos "mano fuera de cuadro" | 0 (aparte de la liberación esperada al principio de cada tramo) |
+**Corrección (revisión externa de `c292efe`):** la tabla original de esta sección
+afirmaba "100% de aciertos (40/40)", "exactamente 2 líneas por repetición" y "0
+líneas durante los tramos sin mano" — **ninguna de esas tres estaba respaldada
+por un cómputo real.** `analyze_fase_d_run.py` nunca comparó contra la señal del
+guion (el CUE no se guardó, ver más abajo), así que no hay forma de verificar
+"precisión contra verdad conocida" con este log solo. Reescrito con lo que sí se
+pudo verificar realmente:
 
-**Nota de conteo (10/11/10/9 en vez de 10/10/10/10):** el guion manda exactamente
-10 repeticiones por gesto, en orden fijo (no hay forma de que el código produzca
-11) — los espaciados entre detecciones de `palma_abierta` son perfectamente
-regulares (~8s, sin ningún hueco corto que sugiera un glitch de tracking), así
-que lo más probable es que JD se haya adelantado o atrasado un conteo propio en
-la transición palma→pulgar/menique (error humano de ejecución, no un defecto del
-bridge) — la suma total (40) y el 100% de aciertos no se ven afectados por esto.
+| métrica | valor | ¿cómo se verificó? |
+|---|---|---|
+| Repeticiones totales (eventos "Gesto detectado") | 40 | conteo directo del log |
+| Repeticiones contaminadas (regla de la sección 4) | 0 | `analyze_fase_d_run.py` |
+| Tiempo de sistema — avg / p50 / p95 / max | 526ms / 543ms / 594ms / **617ms** | `analyze_fase_d_run.py`, racha continua de `[diag] Gesto candidato` |
+| Repeticiones que superan AC3 (<1500ms) | **0/40** | `analyze_fase_d_run.py` |
+| Tiempo detectado→liberado — avg / min / max | 4494ms / 4156ms / 5902ms | `analyze_fase_d_run.py` (desde la detección, NO desde la señal QUITA del guion — ver nota de método abajo) |
+| Secuencia de eventos | estrictamente alternada `detectado, liberado, detectado, liberado...` (80 eventos, 40 pares), sin excepciones | verificado por script aparte, pegado abajo |
+
+**Lo que esto SÍ dice, con precisión:** 40 gestos quedaron confirmados y
+mostrados, cada uno detectado exactamente una vez, sin ningún envío adicional o
+fuera de secuencia (la alternancia estricta D-L-D-L lo confirma mecánicamente).
+**Lo que esto NO dice:** si esos 40 gestos coinciden con los 40 que el guion
+realmente pidió, en el orden y momento que los pidió — **la precisión contra
+verdad conocida NO está verificada**, porque el CUE del guion solo se imprimió en
+la pantalla de JD y no se guardó en ningún archivo (ver limitación ya documentada
+en la sección 4 del plan). Verificación de la alternancia:
+
+```
+$ python3 -c "... cuenta eventos D/L en orden ..."
+secuencia: DLDLDLDLDLDLDLDLDLDLDLDLDLDLDLDLDLDLDLDLDLDLDLDLDLDLDLDLDLDLDLDLDLDLDLDLDLDLDLDL
+longitud: 80
+alterna estrictamente D,L,D,L...: True
+```
+
+**Tabla "Detalle por repetición" completa (las 40), salida real de `analyze_fase_d_run.py`:**
+
+```
+  [  144] 13:43:50,444 puño_cerrado   conf=0.99 t_sistema=   556ms
+  [  203] 13:43:58,578 puño_cerrado   conf=1.00 t_sistema=   511ms
+  [  262] 13:44:06,745 puño_cerrado   conf=1.00 t_sistema=   522ms
+  [  321] 13:44:14,884 puño_cerrado   conf=1.00 t_sistema=   532ms
+  [  380] 13:44:23,069 puño_cerrado   conf=1.00 t_sistema=   596ms
+  [  434] 13:44:30,496 puño_cerrado   conf=1.00 t_sistema=   530ms
+  [  493] 13:44:38,646 puño_cerrado   conf=1.00 t_sistema=   588ms
+  [  551] 13:44:46,658 puño_cerrado   conf=1.00 t_sistema=   581ms
+  [  608] 13:44:54,533 puño_cerrado   conf=1.00 t_sistema=   549ms
+  [  666] 13:45:02,512 puño_cerrado   conf=1.00 t_sistema=   496ms
+  [  727] 13:45:10,982 palma_abierta  conf=0.96 t_sistema=   514ms
+  [  782] 13:45:18,516 palma_abierta  conf=0.98 t_sistema=   553ms
+  [  840] 13:45:26,538 palma_abierta  conf=0.98 t_sistema=   510ms
+  [  898] 13:45:34,523 palma_abierta  conf=0.98 t_sistema=   480ms
+  [  955] 13:45:42,551 palma_abierta  conf=0.96 t_sistema=   528ms
+  [ 1011] 13:45:50,558 palma_abierta  conf=0.98 t_sistema=   543ms
+  [ 1071] 13:45:58,833 palma_abierta  conf=0.97 t_sistema=   543ms
+  [ 1128] 13:46:06,735 palma_abierta  conf=0.98 t_sistema=   555ms
+  [ 1184] 13:46:14,495 palma_abierta  conf=0.97 t_sistema=   583ms
+  [ 1243] 13:46:22,659 palma_abierta  conf=0.99 t_sistema=   579ms
+  [ 1301] 13:46:30,636 palma_abierta  conf=0.98 t_sistema=   551ms
+  [ 1362] 13:46:39,046 dedo_pulgar    conf=0.98 t_sistema=   518ms
+  [ 1416] 13:46:46,487 dedo_pulgar    conf=0.92 t_sistema=   544ms
+  [ 1474] 13:46:54,480 dedo_pulgar    conf=1.00 t_sistema=   489ms
+  [ 1531] 13:47:02,336 dedo_pulgar    conf=0.98 t_sistema=   513ms
+  [ 1595] 13:47:11,211 dedo_pulgar    conf=0.97 t_sistema=   525ms
+  [ 1648] 13:47:18,500 dedo_pulgar    conf=0.96 t_sistema=   461ms
+  [ 1707] 13:47:26,664 dedo_pulgar    conf=0.99 t_sistema=   536ms
+  [ 1765] 13:47:34,652 dedo_pulgar    conf=0.99 t_sistema=   490ms
+  [ 1822] 13:47:42,563 dedo_pulgar    conf=0.93 t_sistema=   558ms
+  [ 1879] 13:47:50,540 dedo_pulgar    conf=0.98 t_sistema=   470ms
+  [ 1937] 13:47:58,562 dedo_menique   conf=1.00 t_sistema=   594ms
+  [ 1995] 13:48:06,535 dedo_menique   conf=1.00 t_sistema=   579ms
+  [ 2054] 13:48:14,696 dedo_menique   conf=1.00 t_sistema=    85ms
+  [ 2111] 13:48:22,567 dedo_menique   conf=1.00 t_sistema=   511ms
+  [ 2168] 13:48:30,562 dedo_menique   conf=1.00 t_sistema=   417ms
+  [ 2226] 13:48:38,593 dedo_menique   conf=1.00 t_sistema=   579ms
+  [ 2284] 13:48:46,618 dedo_menique   conf=1.00 t_sistema=   592ms
+  [ 2341] 13:48:54,653 dedo_menique   conf=1.00 t_sistema=   617ms
+  [ 2396] 13:49:02,488 dedo_menique   conf=1.00 t_sistema=   571ms
+
+=== Resumen ===
+Repeticiones NO contaminadas con tiempo de sistema calculable: 40
+Tiempo de sistema -- avg=526ms p50=543ms p95=594ms max=617ms min=85ms
+Repeticiones que superan AC3 (<1500ms): 0/40
+
+Tiempo detectado->liberado -- n=40 avg=4494ms min=4156ms max=5902ms
+
+Repeticiones NO contaminadas por gesto: {'puño_cerrado': 10, 'palma_abierta': 11, 'dedo_pulgar': 10, 'dedo_menique': 9}
+```
+
+**Nota de conteo (10/11/10/9 en vez de 10/10/10/10) — HIPÓTESIS, no hecho
+confirmado.** El guion manda exactamente 10 repeticiones por gesto en orden fijo
+(el código no puede por sí solo producir 11) — dos hipótesis, ninguna descartada
+con certeza porque no hay CUE guardado:
+
+1. **Error humano de ejecución** (conteo propio de JD adelantado/atrasado en la
+   transición palma→pulgar o pulgar→menique). A favor: los 11 espaciados entre
+   detecciones de `palma_abierta` son perfectamente regulares (~8s cada uno, sin
+   ningún hueco corto que sugiera un glitch de tracking) — son 11 ciclos
+   completos y limpios, no un artefacto de un solo evento duplicado.
+2. **Clasificación incorrecta** (un intento real de `dedo_menique` leído como
+   `palma_abierta`). Investigado explícitamente: se revisó TODA la ventana cruda
+   `[diag] Gesto candidato`/`[diag] Sin gesto reconocido` alrededor de las 11
+   detecciones de palma (13:46:14 a 13:46:45) — **cero candidatos crudos de
+   `dedo_menique` aparecen en esa ventana**, todos son `dedos_extendidos=5`
+   (palma genuina) o ausencia de mano. Esto hace la hipótesis 2 menos probable
+   para este tramo específico, pero no la descarta con certeza para el resto de
+   la secuencia sin el CUE real.
+
+**No se elige entre las dos — queda documentado como abierto**, no resuelto. La
+suma total (40) y la secuencia alternada D-L-D-L no cambian por esto.
 
 **Segunda persona / otras distancias / casos difíciles: pendientes — brecha
 abierta, no cerrada.** JD y Claude decidieron cerrar esta sesión después de la
@@ -2143,6 +2233,19 @@ servicio real (`sudo systemctl start cva-gesture-bridge.service`).
 prueba y aplica las reglas del plan (tiempo de sistema desde la racha continua de
 `[diag] Gesto candidato`, repeticiones contaminadas, tiempo de liberación). No se
 importa desde el paquete.
+
+**Corrección (revisión externa):** `fase_d_schedule.py` no guardaba ningún
+archivo (solo imprimía a pantalla) — por eso la corrida de 50cm no pudo
+verificar nada contra la señal real del guion. Ahora guarda siempre las señales
+en `benchmarks/fase_d_cue_<condición>.log` (mismo formato de timestamp que el
+log del bridge). `analyze_fase_d_run.py` acepta ese archivo como segundo
+argumento opcional y, cuando está presente, calcula el tiempo de liberación
+real **desde la señal QUITA** (no desde la propia detección, que es lo único
+medible sin esa señal) y el tiempo total desde la señal HAZ — emparejado por
+orden, con aviso explícito si los conteos no coinciden en vez de alinear a
+ciegas. Probado con datos sintéticos antes de usarlo (ver commit) — esta
+corrida de 50cm no tiene CUE guardado (se grabó antes de este fix), así que
+estas dos métricas quedan disponibles recién para la próxima sesión de Fase D.
 
 ### Defecto real encontrado al restaurar producción — reportado y corregido con su test
 
@@ -2199,9 +2302,47 @@ instala cuando el import real funciona; la función no pisa un `sounddevice` que
 ya estuviera importado de antes). **Suite completa: 81 passed, 0 failed**
 (antes de este fix: 78).
 
-**Pendiente, para la misma sesión de corrección:** este fix vive en
-`fase-c2-fix-confirmed-output` — para que llegue a producción hace falta
-fusionarlo a `main` (PR aparte, igual que Fase C2) y que production haga
-`git pull` + reinicie. Mientras tanto, decidir con JD si se aplica como hotfix
-directo a producción ahora mismo (servicio real sigue caído) o se espera el
-proceso normal de PR.
+**Corrección (revisión externa de `c292efe`) a estos 3 tests:**
+`test_stub_not_installed_when_real_sounddevice_import_succeeds` dependía de que
+ESTA máquina tuviera audio disponible de verdad (justo la condición que el
+incidente de producción demostró que varía según el contexto) — reescrito para
+simular un import real exitoso con un módulo falso (mismo mecanismo de
+`builtins.__import__`, pero devolviendo un módulo con `__file__` en vez de
+levantar una excepción), ya no depende del entorno. Además, el primer test dejaba
+el stub en blanco pegado en `sys.modules["sounddevice"]` después de correr
+(la función lo muta directamente, no vía `monkeypatch`, así que no se deshacía
+solo) — ahora se guarda el valor original antes y se restaura en un `finally`.
+
+**Verificación bajo condiciones reales del servicio (pedida en la revisión,
+antes de dar el fix por bueno):** el entorno interactivo por SSH tiene
+`XDG_RUNTIME_DIR` y `DBUS_SESSION_BUS_ADDRESS` seteados (confirmado con `env |
+grep`) — justo lo que una unidad de *sistema* de systemd no tiene. Se construyó
+un entorno restringido con `env -i HOME=... PATH=...` (sin esas dos variables ni
+`PULSE_SERVER`) para reproducir la condición real sin tocar el servicio real:
+
+```
+$ env -i HOME="$HOME" PATH="$PATH" .venv-fase-c2-fix/bin/python -c "import mediapipe"
+...
+sounddevice.PortAudioError: Error initializing PortAudio: Unanticipated host
+error [PaErrorCode -9999]: 'PulseAudio_Initialize: Can't connect to server'
+```
+**El bug reproduce exacto** (mismo error que journalctl mostró en producción) en
+este entorno restringido, sin el fix. Con el fix (`GestureDetector` real,
+construido y corriendo `detect()` contra un fixture real, mismo entorno
+restringido):
+
+```
+$ env -i HOME="$HOME" PATH="$PATH" .venv-fase-c2-fix/bin/python -c "..."
+OK: GestureDetector se construyo correctamente (con el fix) en entorno sin
+XDG_RUNTIME_DIR/DBUS_SESSION_BUS_ADDRESS/PULSE_SERVER
+OK: detect() corrio sobre un fixture real -- gesture=puño_cerrado confidence=0.9983
+```
+
+**Estado del fix en producción:** ya se aplicó como hotfix directo (autorizado
+por JD, antes de que llegara esta revisión) mientras el servicio real estaba
+caído — commit local `4a4f793` en el `main` de producción, servicio verificado
+`active (running)` escuchando en 8766. El mismo fix, con sus tests y ahora la
+verificación bajo condiciones reales de arriba, vive en
+`fase-c2-fix-confirmed-output` — pendiente fusionarlo a `main` por PR para que
+el hotfix local de producción quede reconciliado con el historial real (debería
+ser un `git pull` limpio, sin conflicto, mismo contenido).

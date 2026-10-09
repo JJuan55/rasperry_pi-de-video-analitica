@@ -588,6 +588,12 @@ def test_stub_sounddevice_installed_when_real_import_fails(monkeypatch):
     import builtins
     import sys
 
+    # Guarda el valor real (si lo hay) para restaurarlo al final -- la función
+    # muta sys.modules directamente, no a través de monkeypatch, así que
+    # monkeypatch no deshace eso solo (revisión externa, 2026-10: el primer
+    # intento dejaba el stub en blanco contaminando sys.modules para el resto
+    # de la sesión de tests).
+    original = sys.modules.get("sounddevice")
     monkeypatch.delitem(sys.modules, "sounddevice", raising=False)
     real_import = builtins.__import__
 
@@ -598,24 +604,48 @@ def test_stub_sounddevice_installed_when_real_import_fails(monkeypatch):
 
     monkeypatch.setattr(builtins, "__import__", fake_import)
 
-    _stub_sounddevice_if_unavailable()
-
-    assert "sounddevice" in sys.modules
-    # Un stub en blanco (types.ModuleType) nunca tiene __file__ -- el paquete real sí.
-    assert not hasattr(sys.modules["sounddevice"], "__file__")
+    try:
+        _stub_sounddevice_if_unavailable()
+        assert "sounddevice" in sys.modules
+        # Un stub en blanco (types.ModuleType) nunca tiene __file__ -- el paquete real sí.
+        assert not hasattr(sys.modules["sounddevice"], "__file__")
+    finally:
+        if original is not None:
+            sys.modules["sounddevice"] = original
+        else:
+            sys.modules.pop("sounddevice", None)
 
 
 def test_stub_not_installed_when_real_sounddevice_import_succeeds(monkeypatch):
+    import builtins
     import sys
+    import types as types_module
 
+    # No depende de que ESTA máquina/entorno tenga audio disponible de verdad
+    # (revisión externa, 2026-10: el intento anterior sí dependía de eso, y el
+    # incidente real de Fase D demostró que la disponibilidad de audio varía
+    # según el contexto -- interactivo por SSH vs. unidad de systemd) -- se
+    # simula un import real exitoso con un módulo falso que sí tiene __file__,
+    # igual que tendría el paquete real instalado.
     monkeypatch.delitem(sys.modules, "sounddevice", raising=False)
+    fake_real_module = types_module.ModuleType("sounddevice")
+    fake_real_module.__file__ = "/fake/site-packages/sounddevice.py"
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "sounddevice":
+            sys.modules["sounddevice"] = fake_real_module
+            return fake_real_module
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
 
     _stub_sounddevice_if_unavailable()
 
-    # En esta máquina/entorno de test sounddevice sí se puede importar de
-    # verdad -- la función no debe pisarlo con un stub (eso ocultaría un fallo
-    # real de audio en los entornos donde sí hay sesión disponible).
-    assert "sounddevice" in sys.modules
+    # La función no debe pisar el import real exitoso con un stub -- eso
+    # ocultaría un fallo real de audio en los entornos donde sí hay sesión
+    # disponible.
+    assert sys.modules["sounddevice"] is fake_real_module
     assert hasattr(sys.modules["sounddevice"], "__file__")
 
 

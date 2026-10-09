@@ -6,7 +6,15 @@ antes, salvo la primera de toda la batería), líneas por repetición, tiempo de
 liberación.
 
 No se importa desde el paquete. Uso:
-    .venv-fase-c2-fix/bin/python benchmarks/analyze_fase_d_run.py <log_file>
+    .venv-fase-c2-fix/bin/python benchmarks/analyze_fase_d_run.py <log_file> [cue_log_file]
+
+`cue_log_file` es opcional -- el archivo que guarda `fase_d_schedule.py` (desde la
+corrección de 2026-10, antes no guardaba nada en disco, ver BITACORA.md "Fase D").
+Cuando está presente, el tiempo de liberación se calcula desde la señal QUITA real
+del guion (no desde la propia detección, que es lo único que se podía medir antes
+sin esa señal) -- emparejado por orden (n-ésima liberación real <-> n-ésima señal
+QUITA), avisando explícitamente si los conteos no coinciden en vez de alinear a
+ciegas.
 """
 
 import re
@@ -18,6 +26,7 @@ DIAG_CANDIDATE_RE = re.compile(r"\[diag\] Gesto candidato: (\S+) \(confianza=([\
 DIAG_NONE_RE = re.compile(r"\[diag\] Sin gesto reconocido")
 DETECTADO_RE = re.compile(r"Gesto detectado: (\S+) \(confianza=([\d.]+)\)")
 LIBERADO_RE = re.compile(r"Gesto liberado \(antes: (\S+)\)")
+CUE_RE = re.compile(r"CUE: \[(\d+)/\d+\] (HAZ|QUITA)(?:: (\S+))?")
 
 
 def _parse_ts(line):
@@ -25,8 +34,22 @@ def _parse_ts(line):
     return datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S,%f") if m else None
 
 
+def _parse_cue_log(path):
+    cues = []  # (ts, rep_num, kind, gesture_o_None)
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            ts = _parse_ts(line)
+            if ts is None:
+                continue
+            m = CUE_RE.search(line)
+            if m:
+                cues.append((ts, int(m.group(1)), m.group(2), m.group(3)))
+    return cues
+
+
 def main():
     path = sys.argv[1] if len(sys.argv) > 1 else "benchmarks/fase_d_run_sin_condicion.log"
+    cue_path = sys.argv[2] if len(sys.argv) > 2 else None
     with open(path, encoding="utf-8") as f:
         lines = f.readlines()
 
@@ -163,6 +186,54 @@ def main():
     from collections import Counter
     gcount = Counter(r["gesture"] for r in reps if not r["contaminated"])
     print(f"\nRepeticiones NO contaminadas por gesto: {dict(gcount)}")
+
+    # --- 4) Si hay CUE log: tiempo de liberación real (desde la señal QUITA, no
+    # desde la propia detección) + tiempo total desde la señal HAZ hasta la
+    # detección -- pedido en la revisión del plan, 2026-10. Emparejado por orden,
+    # avisando si los conteos no coinciden en vez de alinear a ciegas. ---
+    if cue_path:
+        cues = _parse_cue_log(cue_path)
+        haz_cues = [c for c in cues if c[2] == "HAZ"]
+        quita_cues = [c for c in cues if c[2] == "QUITA"]
+        print(f"\n=== CUE log: {cue_path} ({len(haz_cues)} HAZ, {len(quita_cues)} QUITA) ===")
+
+        releases_only = [(ts, data) for ts, kind, data in events if kind == "liberado"]
+        if len(releases_only) == len(quita_cues):
+            release_from_cue = [
+                (r_ts - q_ts).total_seconds() * 1000
+                for (r_ts, _), (q_ts, _, _, _) in zip(releases_only, quita_cues)
+            ]
+            n2 = len(release_from_cue)
+            print(
+                f"Tiempo de liberación desde la señal QUITA real -- n={n2} "
+                f"avg={sum(release_from_cue)/n2:.0f}ms min={min(release_from_cue):.0f}ms "
+                f"max={max(release_from_cue):.0f}ms"
+            )
+        else:
+            print(
+                f"AVISO: {len(releases_only)} liberaciones reales vs {len(quita_cues)} "
+                f"señales QUITA -- no coinciden, no se calcula (revisar repeticiones "
+                f"contaminadas o perdidas antes de confiar en un emparejamiento por orden)"
+            )
+
+        detections_only = [(r["detect_ts"], r["gesture"]) for r in reps if not r["contaminated"]]
+        if len(detections_only) == len(haz_cues):
+            total_from_cue = [
+                (d_ts - h_ts).total_seconds() * 1000
+                for (d_ts, _), (h_ts, _, _, _) in zip(detections_only, haz_cues)
+            ]
+            n3 = len(total_from_cue)
+            print(
+                f"Tiempo TOTAL desde la señal HAZ (incluye reacción humana, NO es "
+                f"tiempo de sistema, no se evalúa contra AC3) -- n={n3} "
+                f"avg={sum(total_from_cue)/n3:.0f}ms min={min(total_from_cue):.0f}ms "
+                f"max={max(total_from_cue):.0f}ms"
+            )
+        else:
+            print(
+                f"AVISO: {len(detections_only)} detecciones no contaminadas vs "
+                f"{len(haz_cues)} señales HAZ -- no coinciden, no se calcula"
+            )
 
 
 if __name__ == "__main__":
