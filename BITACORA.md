@@ -2461,3 +2461,170 @@ instrucción fue solo lectura, así que no se probó.
 
 Ninguno de los dos se ejecutó — queda pendiente de que JD decida cuál prefiere,
 y de la fusión real del PR primero.
+
+## Fase D, sesión 2 — preparación (paso 1, 2026-10-13, sin ejecutar la medición)
+
+Contexto: `main` de producción = `2b74314` (PR #3 fusionado), servicio real
+sirviendo ese código en el puerto 8766. **Esta sesión mide DIRECTO contra el
+servicio real** — no se detiene el servicio, no se arranca instancia de
+prueba, no hace falta `sudo` para nada de la medición en sí. Trabajo hecho en
+una rama nueva (`fase-d-mediciones-2`, desde `origin/main` en `2b74314`) en el
+worktree ya existente `~/video_analitica/cva-pi-repo-fase-c2-fix`.
+
+**Este es solo el Paso 1 (preparación) — no se ejecutó ninguna medición con JD
+todavía.** Documentado para revisión antes de la sesión real.
+
+### Reglas fijas de esta sesión
+
+1. **Producción intocable**: nada de `git`, `pip`, edición ni reinicio en
+   `~/video_analitica/rasperry_pi-de-video-analitica`, su `.venv` ni el archivo
+   del servicio. Del log de producción (`logs/cva_gesture_bridge.log` y sus
+   rotados) **solo se lee**.
+2. Trabajo en `~/video_analitica/cva-pi-repo-fase-c2-fix`, rama
+   `fase-d-mediciones-2`. Push **solo** a `origin/fase-d-mediciones-2`, nunca a
+   `main`.
+3. El nivel de logging no cambia — `[diag]` sigue en INFO (el análisis depende
+   de esas líneas). Su reversión a DEBUG es posterior al cierre de Fase D,
+   decisión aparte.
+4. Cada herramienta nueva lleva su test. Cualquier defecto se reporta primero,
+   nunca se arregla en silencio ni se mezcla con los datos de la medición.
+5. Solo se reporta lo verificado contra el código y el sistema real.
+
+### A. Análisis por ventana de tiempo (con rotación de logs)
+
+`benchmarks/analyze_fase_d_run.py` no tenía ninguna forma de cortar el log por
+rango antes de esto — ahora acepta `--desde`/`--hasta` (mismo formato de
+timestamp del log, con o sin milisegundos). `discover_rotated_logs()` busca
+los archivos vecinos del log dado (mismo directorio, mismo nombre base —
+`TimedRotatingFileHandler` nombra el activo `cva_gesture_bridge.log` y los
+rotados `cva_gesture_bridge.log.YYYY-MM-DD`, confirmado contra los archivos
+reales de producción, no asumido) y los ordena por el **primer timestamp de
+contenido real de cada archivo**, no por el nombre a ciegas — así una ventana
+que cruce medianoche concatena automáticamente lo que haga falta, en el orden
+cronológico correcto. Nunca escribe ni borra nada — abre todo en modo lectura.
+
+### B. Tiempo de liberación — dos variantes, una de ellas nueva
+
+Ya existía (desde Fase D sesión 1) el cálculo desde la señal **QUITA** real
+del guion, cuando hay CUE guardado — confirmado que sigue funcionando igual.
+
+**Agregado**: el **tiempo de liberación DEL SISTEMA**, derivado del log crudo
+solo (sin necesitar CUE) — se reproduce el `GestureStabilizer` real con
+`hand_present` calculado igual que `main.py`
+(`not (gesture is None and extended_fingers == 0)`, usando el
+`dedos_extendidos` que el log YA incluye en cada línea `[diag]`) y se mide
+desde el último frame que de verdad coincidió con el gesto confirmado hasta la
+línea `Gesto liberado` — es la parte de liberación que depende solo del
+sistema, sin la reacción humana de sacar la mano. Verificado contra el log
+real de la sesión 1 (50cm): avg=2349ms, p50=2339ms, max=2476ms, min=2262ms —
+consistente con el piso teórico de `GESTURE_RELEASE_AFTER_MISSES_NO_HAND=16` ×
+~143ms ≈ 2288ms (Fase C2), no un número sin relación con el código real.
+
+### C. Batería corta de liberación (20 repeticiones)
+
+`fase_d_schedule.py` ahora acepta `--repeats N` (default 10) — `build_sequence()`
+separado como función pura, testeable sin esperar los sleeps reales. Para la
+batería de liberación: 4 gestos × 5 repeticiones = 20, mismos tiempos del guion
+actual (3s sostener, 5s fuera de cuadro, pitido en cada señal).
+
+### D. Guion de casos difíciles
+
+`benchmarks/fase_d_hard_cases.py` (nuevo), mismo estilo/reloj que
+`fase_d_schedule.py` (factorizado el pitido+log+timestamp compartido en
+`benchmarks/fase_d_common.py`, para no duplicar esa lógica entre los dos
+guiones). 5 casos, orden fijo, cada uno con 10s de cuenta regresiva + 30s de
+bloque medido:
+
+1. Movimiento rápido — cambiar entre los 4 gestos del catálogo sin sostener.
+2. Mano tapada a medias intentando `palma_abierta`.
+3. Mano en el borde del cuadro intentando `puño_cerrado`.
+4. Dos manos en cuadro intentando `dedo_pulgar`.
+5. Persona (no JD) pasando detrás, mano de JD fuera de cuadro todo el bloque.
+
+Guarda las señales en `benchmarks/fase_d_cue_hard_cases_<fecha_hora>.log`
+(modo "x", igual criterio que el guion principal).
+
+### E. Análisis de casos difíciles — criterios definidos ANTES de medir
+
+`benchmarks/analyze_hard_cases.py` (nuevo), reutiliza el descubrimiento de
+rotación y el parseo de eventos de `analyze_fase_d_run.py`:
+
+- **Casos 2, 3, 4**: aceptable = no confirmar nada, o confirmar el gesto
+  objetivo. NO aceptable = confirmar un gesto distinto al objetivo.
+- **Caso 1** (movimiento rápido): cualquier gesto del catálogo es aceptable
+  (JD los cambia a propósito) — pero el criterio completo ("no más de un envío
+  por cambio real, nada fuera de la ventana") **no es verificable
+  automáticamente**: no se grabó la señal de cada cambio real dentro del
+  bloque de 30s. El script reporta lo observado (qué se envió, cuántas veces)
+  para juicio humano, sin forzar un veredicto automático que no estaría
+  respaldado.
+- **Caso 5**: CUALQUIER línea `gesto: X` dentro de la ventana es NO aceptable.
+- **Caso 4, "cuál mano eligió el detector"**: **no verificable** — MediaPipe
+  corre con `num_hands=1` y no reporta cuál de las dos manos físicas presentes
+  fue la procesada. El script lo dice explícitamente en vez de inventar una
+  respuesta.
+
+Mismo proxy ya documentado en toda Fase D: "línea `gesto: X` enviada" se lee
+de la línea `Gesto detectado` del log (con la salvedad ya conocida del caso
+borde de confianza por debajo de `MIN_CONFIDENCE`).
+
+### Limitaciones (igual criterio de honestidad que el resto de Fase D)
+
+- La medición llega solo hasta el envío desde la Pi — no incluye la red del
+  túnel SSH ni el tiempo de la pantalla del cliente.
+- No hay segunda persona de otro tono de piel — sigue como brecha abierta, no
+  cerrada (ya documentada en Fase D sesión 1).
+- Las distancias media y lejana quedan aplazadas por decisión de JD — esta
+  sesión 2 repite la condición 50cm (liberación + casos difíciles), no agrega
+  distancias nuevas.
+- "Línea `gesto: X` enviada" sigue siendo un proxy de "Gesto detectado" en el
+  log, no una confirmación de que el byte realmente salió por el socket (caso
+  borde ya documentado: confianza confirmada por debajo de `MIN_CONFIDENCE`).
+
+### Comandos exactos para JD
+
+**Preparación**: cliente LaboRemoto abierto, módulo de práctica CVA activo,
+cámara a **50cm** (misma distancia de la sesión 1), conectado por el túnel SSH
+de siempre al servicio real (puerto 8766) — nada de instancia de prueba, nada
+de `sudo`.
+
+**Batería de liberación** (en una terminal SSH aparte, la del guion, no la del
+cliente):
+```bash
+cd ~/video_analitica/cva-pi-repo-fase-c2-fix
+.venv-fase-c2-fix/bin/python benchmarks/fase_d_schedule.py 50cm_liberacion --repeats 5
+```
+
+**Casos difíciles** (misma terminal del guion, después de terminar la batería
+de arriba; para el caso 5 ten lista a la segunda persona ANTES de empezar —
+cada caso avisa con 10s de cuenta regresiva, no alcanza para ir a buscar a
+alguien):
+```bash
+.venv-fase-c2-fix/bin/python benchmarks/fase_d_hard_cases.py
+```
+
+### Qué hará la Pi DESPUÉS de la sesión (descrito, NO ejecutado todavía)
+
+1. Anotar la hora exacta de inicio/fin de cada corrida (ya queda en los
+   nombres de los archivos de CUE, con fecha y hora).
+2. Cortar el log de producción (`logs/cva_gesture_bridge.log` y rotados, solo
+   lectura) por esa ventana con `--desde`/`--hasta`.
+3. Correr `analyze_fase_d_run.py` sobre la ventana de la batería de liberación
+   (con `--cue` apuntando al CUE guardado) y `analyze_hard_cases.py` sobre la
+   ventana de los casos difíciles.
+4. Documentar los resultados reales en BITACORA.md, sección "Fase D, sesión 2
+   — resultados", con el mismo estándar de siempre (números reales, no
+   estimados; brechas abiertas marcadas como tales).
+
+### Cierre de este Paso 1 — evidencia
+
+
+```
+$ cd ~/video_analitica/rasperry_pi-de-video-analitica && git status --short
+(vacío)
+$ git log -1 --oneline
+2b74314 Merge pull request #3 from JJuan55/fase-c2-fix-confirmed-output
+```
+Producción sin cambios, confirmado de nuevo (solo lectura) al cerrar este Paso 1.
+Rama, hash del push y conteo de tests: reportados en el mensaje de cierre de
+esta sesión (ver también `git log` de `fase-d-mediciones-2`).
