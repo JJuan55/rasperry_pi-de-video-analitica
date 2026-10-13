@@ -215,3 +215,157 @@ def test_detections_in_window_filters_by_timestamp():
     assert len(dets) == 2
     assert dets[0][1] == "puño_cerrado"
     assert dets[1][1] == "palma_abierta"
+
+
+# --- Correcciones de la revisión (rama fase-d-herramientas-fix) -------------
+# a) liberación del sistema = (cuadros sin gesto necesarios) x (periodo)
+
+
+def _synthetic_hold_then_no_hand(period_ms, hold_frames=7, absent_frames=25):
+    """Secuencia cruda sintética a periodo fijo: `hold_frames` cuadros con
+    palma_abierta (5 dedos), luego `absent_frames` cuadros sin mano
+    (gesto=None, dedos=0 -> hand_present=False)."""
+    from datetime import datetime, timedelta
+    t0 = datetime(2026, 10, 13, 10, 0, 0)
+    seq = []
+    for i in range(hold_frames + absent_frames):
+        ts = t0 + timedelta(milliseconds=i * period_ms)
+        if i < hold_frames:
+            seq.append((ts, "palma_abierta", 5))
+        else:
+            seq.append((ts, None, 0))
+    return seq
+
+
+def test_system_release_equals_required_misses_times_frame_period():
+    from cva_gesture_bridge.vision.detector import GestureStabilizer
+    misses_needed = GestureStabilizer()._release_after_misses_no_hand
+
+    for period_ms in (143, 250):
+        raw = _synthetic_hold_then_no_hand(period_ms)
+        confirm_events, release_events = afr.replay_stabilizer(raw)
+        assert len(confirm_events) == 1
+        assert len(release_events) == 1
+        times, skipped = afr.system_release_times_ms(release_events)
+        assert skipped == 0
+        assert times == [misses_needed * period_ms]
+
+
+def test_system_release_changes_when_frame_period_changes():
+    # Mismos cuadros, distinto fps -> distinta liberación: el número depende
+    # del periodo real entre cuadros, no es una constante del sistema.
+    at_7fps, _ = afr.system_release_times_ms(afr.replay_stabilizer(_synthetic_hold_then_no_hand(143))[1])
+    at_4fps, _ = afr.system_release_times_ms(afr.replay_stabilizer(_synthetic_hold_then_no_hand(250))[1])
+    assert at_7fps != at_4fps
+    assert at_4fps[0] > at_7fps[0]
+
+
+def test_raw_observations_from_events_keeps_order_and_none():
+    from datetime import datetime
+    events = [
+        (datetime(2026, 1, 1, 10, 0, 0), "diag_candidato", ("puño_cerrado", 0.9, 0)),
+        (datetime(2026, 1, 1, 10, 0, 1), "detectado", ("puño_cerrado", 0.9)),
+        (datetime(2026, 1, 1, 10, 0, 2), "diag_none", 0),
+    ]
+    raw = afr.raw_observations_from_events(events)
+    assert raw == [
+        (datetime(2026, 1, 1, 10, 0, 0), "puño_cerrado", 0),
+        (datetime(2026, 1, 1, 10, 0, 2), None, 0),
+    ]
+
+
+# b) emparejamiento QUITA <-> liberación por tiempo
+
+
+def _cue(sec, rep, kind, gesture=None):
+    from datetime import datetime, timedelta
+    return (datetime(2026, 10, 13, 10, 0, 0) + timedelta(seconds=sec), rep, kind, gesture)
+
+
+def _ts(sec):
+    from datetime import datetime, timedelta
+    return datetime(2026, 10, 13, 10, 0, 0) + timedelta(seconds=sec)
+
+
+def test_match_quita_to_releases_by_time_with_one_rep_without_release():
+    cues = [
+        _cue(0, 1, "HAZ", "puño_cerrado"), _cue(3, 1, "QUITA"),
+        _cue(8, 2, "HAZ", "puño_cerrado"), _cue(11, 2, "QUITA"),
+        _cue(16, 3, "HAZ", "puño_cerrado"), _cue(19, 3, "QUITA"),
+    ]
+    releases = [
+        _ts(1.5),   # liberación espuria DURANTE el sostenido de la rep 1 -- no cuenta
+        _ts(5.5),   # rep 1: QUITA a los 3s -> 2500ms
+        # rep 2: ninguna liberación entre la QUITA (11s) y el siguiente HAZ (16s)
+        _ts(16.5),  # después del HAZ de la rep 3 -- NO debe asignarse a la rep 2
+        _ts(21.4),  # rep 3: QUITA a los 19s -> 2400ms
+    ]
+    pairs = afr.match_quita_to_releases(cues, releases)
+    assert [p[0] for p in pairs] == [1, 2, 3]
+    assert pairs[0][2] == _ts(5.5) and round(pairs[0][3]) == 2500
+    assert pairs[1][2] is None and pairs[1][3] is None
+    assert pairs[2][2] == _ts(21.4) and round(pairs[2][3]) == 2400
+    # el emparejamiento por ORDEN (versión anterior) habría asignado 1.5s a la
+    # rep 1 (tiempo negativo) y descartado todo por conteos distintos.
+    assert sum(1 for p in pairs if p[2] is None) == 1
+
+
+def test_match_quita_last_rep_has_no_upper_bound():
+    cues = [_cue(0, 1, "HAZ", "a"), _cue(3, 1, "QUITA")]
+    pairs = afr.match_quita_to_releases(cues, [_ts(5.3)])
+    assert pairs == [(1, _ts(3), _ts(5.3), 2300.0)]
+
+
+def test_summarize_ms_nearest_rank_percentiles():
+    vals = list(range(1, 21))  # 1..20
+    s = afr.summarize_ms(vals)
+    assert s["n"] == 20 and s["min"] == 1 and s["max"] == 20
+    assert s["p50"] == 11 and s["p95"] == 19
+    assert s["avg"] == 10.5
+    assert afr.summarize_ms([]) is None
+
+
+# c) casos difíciles: gesto activo al empezar + liberación dentro del bloque
+
+
+def test_active_gesture_at_tracks_last_detected_or_released():
+    events = [
+        (_ts(0), "detectado", ("palma_abierta", 0.9)),
+        (_ts(2), "detectado", ("puño_cerrado", 0.9)),  # cambio A->B sin liberar
+        (_ts(5), "liberado", "puño_cerrado"),
+        (_ts(8), "detectado", ("dedo_pulgar", 0.9)),
+    ]
+    assert ahc.active_gesture_at(events, _ts(1)) == "palma_abierta"
+    assert ahc.active_gesture_at(events, _ts(3)) == "puño_cerrado"
+    assert ahc.active_gesture_at(events, _ts(6)) is None
+    assert ahc.active_gesture_at(events, _ts(8)) is None  # estrictamente anterior
+    assert ahc.active_gesture_at(events, _ts(9)) == "dedo_pulgar"
+    assert ahc.active_gesture_at([], _ts(9)) is None
+
+
+def test_releases_in_window_filters_by_timestamp():
+    events = [
+        (_ts(1), "liberado", "palma_abierta"),
+        (_ts(4), "detectado", ("puño_cerrado", 0.9)),
+        (_ts(6), "liberado", "puño_cerrado"),
+    ]
+    assert ahc.releases_in_window(events, _ts(2), _ts(10)) == [(_ts(6), "puño_cerrado")]
+
+
+def test_persona_detras_active_gesture_crossing_start_is_not_acceptable():
+    # Sin ningún envío dentro del bloque, pero con un gesto vigente desde antes:
+    ok, detail = ahc.evaluate_case(
+        "persona_detras_sin_gesto", None, [], active_at_start="palma_abierta"
+    )
+    assert ok is False
+    assert "NO ACEPTABLE" in detail and "ACTIVO al empezar" in detail
+    # Nada activo y nada enviado: correcto.
+    ok, _ = ahc.evaluate_case("persona_detras_sin_gesto", None, [], active_at_start=None)
+    assert ok is True
+
+
+def test_active_gesture_at_start_does_not_change_verdict_of_other_cases():
+    ok, _ = ahc.evaluate_case(
+        "mano_tapada_palma_abierta", "palma_abierta", [], active_at_start="puño_cerrado"
+    )
+    assert ok is True

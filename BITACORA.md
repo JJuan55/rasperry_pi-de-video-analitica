@@ -2507,6 +2507,8 @@ cronológico correcto. Nunca escribe ni borra nada — abre todo en modo lectura
 
 Ya existía (desde Fase D sesión 1) el cálculo desde la señal **QUITA** real
 del guion, cuando hay CUE guardado — confirmado que sigue funcionando igual.
+*(Corregido después: ese cálculo emparejaba por orden y ahora empareja por
+tiempo. Ver "Fase D, sesión 2 — correcciones de herramientas".)*
 
 **Agregado**: el **tiempo de liberación DEL SISTEMA**, derivado del log crudo
 solo (sin necesitar CUE) — se reproduce el `GestureStabilizer` real con
@@ -2517,8 +2519,36 @@ desde el último frame que de verdad coincidió con el gesto confirmado hasta la
 línea `Gesto liberado` — es la parte de liberación que depende solo del
 sistema, sin la reacción humana de sacar la mano. Verificado contra el log
 real de la sesión 1 (50cm): avg=2349ms, p50=2339ms, max=2476ms, min=2262ms —
-consistente con el piso teórico de `GESTURE_RELEASE_AFTER_MISSES_NO_HAND=16` ×
-~143ms ≈ 2288ms (Fase C2), no un número sin relación con el código real.
+~~consistente con el piso teórico de `GESTURE_RELEASE_AFTER_MISSES_NO_HAND=16` ×
+~143ms ≈ 2288ms (Fase C2), no un número sin relación con el código real.~~
+
+> **Corrección (revisión de Fase D sesión 2, rama `fase-d-herramientas-fix`):**
+> la frase tachada presentaba como validación algo que no lo es. Que el
+> resultado "concuerde con 2288ms" es **por construcción**: el cálculo
+> reproduce el mismo `GestureStabilizer`, y con la mano fuera de cuadro
+> (`hand_present=False`) suelta exactamente al cuadro 16 sin gesto
+> (`GESTURE_RELEASE_AFTER_MISSES_NO_HAND=16`). Lo que mide es, por tanto,
+> **16 × el periodo real entre cuadros**. No es una validación independiente
+> del contador; lo único que aporta el dato real es el periodo entre cuadros
+> (fps del cliente). Ahora hay un test que lo afirma de forma explícita
+> (`test_system_release_equals_required_misses_times_frame_period`: 16 × 143ms y
+> 16 × 250ms, y que cambia si cambia el periodo). Al recalcularlo con la
+> herramienta refactorizada sobre el archivo archivado de la sesión 1
+> (`benchmarks/fase_d_run_sin_condicion.log`) da avg=2348ms, p50=2338ms,
+> max=2476ms, min=2262ms. La salida es idéntica byte a byte a la versión anterior
+> de la herramienta sobre ese mismo archivo. La diferencia de 1ms con los
+> números de arriba **no está explicada**: no quedó registrado contra qué
+> archivo o ventana exacta se calcularon. Queda anotada, sin atribuirle una causa.
+>
+> **Dato para Fases 9/10:** la liberación **depende de los fps**. 16 cuadros a
+> 4–8 fps (periodo de 250–125ms) son **~2 a ~4 s** (16 × 125ms = 2000ms;
+> 16 × 250ms = 4000ms). Con mano presente pero ambigua el umbral es 20
+> cuadros (`GESTURE_RELEASE_AFTER_MISSES=20`): 2,5 a 5 s. Si en Fase 9/10 un
+> actuador debe detenerse en un tiempo máximo garantizado, ese tiempo tiene
+> que expresarse en segundos y no en cuadros, o el contador tiene que
+> convertirse a tiempo. Con el diseño actual, una caída de fps del cliente
+> alarga la liberación de forma proporcional. No se cambia nada del servicio
+> aquí: queda como dato de diseño para esas fases.
 
 ### C. Batería corta de liberación (20 repeticiones)
 
@@ -2628,3 +2658,122 @@ $ git log -1 --oneline
 Producción sin cambios, confirmado de nuevo (solo lectura) al cerrar este Paso 1.
 Rama, hash del push y conteo de tests: reportados en el mensaje de cierre de
 esta sesión (ver también `git log` de `fase-d-mediciones-2`).
+
+## Fase D, sesión 2 — correcciones de herramientas (2026-10-13, rama `fase-d-herramientas-fix`)
+
+Rama nueva desde `origin/main` en `993d0ea` (PR #4 ya fusionado), en el
+worktree `~/video_analitica/cva-pi-repo-fase-d-fix`. Solo cambian
+`benchmarks/analyze_fase_d_run.py`, `benchmarks/analyze_hard_cases.py`,
+`tests/test_fase_d_tools.py` y esta bitácora. No se toca nada del paquete
+`cva_gesture_bridge` ni de producción. Los CUE y el log de producción no se
+modifican.
+
+**Estado de los datos al hacer estas correcciones:** al momento de este paso
+**no existe ningún archivo `fase_d_cue_*`** en la Pi (búsqueda en todo
+`/home/david_cardenas`), así que la corrida de liberación y de casos difíciles
+todavía no ha generado CUE. El análisis (Paso 2) queda pendiente hasta que
+existan.
+
+### Tasklist
+
+- [x] a) Extraer de `main()` el cálculo de liberación a funciones puras y testearlo
+  con una secuencia sintética.
+- [x] b) Emparejar QUITA ↔ liberación por tiempo, reportar las QUITA sin
+  liberación y testearlo con una repetición sin liberación.
+- [x] c) Casos difíciles: agregar "gesto activo al empezar" y "liberación dentro del
+  bloque". En el caso 5, un gesto activo que cruza el inicio es NO aceptable.
+  Con test.
+- [x] d) Corregir la afirmación "concuerda con 2288ms" (arriba, sección B de la
+  preparación) y documentar la dependencia de los fps para Fases 9/10.
+- [ ] Paso 2: analizar la sesión real. **Bloqueado: no hay CUE todavía.**
+
+### a) Liberación del sistema como función pura
+
+El bloque que reproducía el `GestureStabilizer` dentro de `main()` pasó a
+cuatro funciones puras: `raw_observations_from_events()`, `replay_stabilizer()`,
+`system_release_times_ms()` y `summarize_ms()` (avg/p50/p95/max/min/n por
+rango más cercano, el mismo criterio que ya usaba el resto de Fase D). `main()`
+ahora solo las llama.
+
+**Verificación de no-regresión:** sin `--cue`, la salida sobre el log
+archivado de la sesión 1 es idéntica (`diff` vacío) entre la versión anterior
+(`993d0ea`) y la refactorizada.
+
+Tests nuevos: `test_system_release_equals_required_misses_times_frame_period`
+(liberación = `_release_after_misses_no_hand` × periodo, a 143ms y a 250ms),
+`test_system_release_changes_when_frame_period_changes` y
+`test_raw_observations_from_events_keeps_order_and_none`.
+
+### b) QUITA ↔ liberación por tiempo
+
+**Defecto real de la versión anterior:** emparejaba por orden (n-ésima
+liberación con la n-ésima QUITA) y, si los conteos no coincidían, no calculaba
+nada. Bastaba una liberación espuria durante un sostenido, o una repetición sin
+liberación, para perder la batería entera. Y si por casualidad los conteos sí
+coincidían, podía emparejar mal (una liberación anterior a su QUITA da un
+tiempo negativo).
+
+**Ahora:** `match_quita_to_releases()` asigna a cada QUITA la **primera**
+liberación posterior a ella y anterior al siguiente HAZ. La última QUITA no
+tiene límite superior, más allá de la ventana `--hasta`. Se imprime una línea
+por QUITA con su liberación o con "SIN liberación en el intervalo", y el
+conteo `QUITA sin liberación en su intervalo: k/n`. Las estadísticas
+(avg/p50/p95/max/min/n) se calculan solo sobre las QUITA emparejadas.
+
+Tests: `test_match_quita_to_releases_by_time_with_one_rep_without_release` (una
+liberación espuria durante el sostenido, una repetición sin liberación y una
+liberación posterior al siguiente HAZ que no debe asignarse a la repetición
+anterior), `test_match_quita_last_rep_has_no_upper_bound` y
+`test_summarize_ms_nearest_rank_percentiles`.
+
+**Sin cambio, anotado:** el emparejamiento HAZ ↔ detección (tiempo total desde
+HAZ, que incluye la reacción humana) **sigue siendo por orden** y solo se
+calcula si los conteos coinciden. No estaba en el alcance de esta corrección y
+no entra en la tabla de resultados pedida. Si se quiere usar ese número, debe
+pasar por la misma corrección antes.
+
+### c) Casos difíciles: estado al empezar y liberación dentro del bloque
+
+- `active_gesture_at(events, ts)` devuelve el gesto vigente para el cliente en
+  el instante ARRANCA: la última línea `Gesto detectado` estrictamente anterior,
+  salvo que después haya un `Gesto liberado`. Se apoya en lo que hace
+  `main.py`, verificado en el código: un cambio A→B manda `Gesto detectado: B`
+  sin liberar en medio, y `Gesto liberado` solo se manda al soltar. Se calcula
+  sobre el log **completo**, no solo sobre `--desde/--hasta`, para no perder un
+  gesto confirmado antes de la ventana.
+- `releases_in_window()` devuelve las liberaciones dentro de cada bloque.
+- El reporte por caso ahora imprime: el gesto activo al empezar, cada línea
+  enviada con su hora y confianza, cada liberación y el conteo de
+  liberaciones.
+- **Caso 5:** un gesto activo al empezar el bloque es **NO aceptable** (para
+  el cliente, la instrucción sigue vigente durante el bloque aunque no se
+  reenvíe). En los casos 1–4 el estado al empezar **se reporta pero no cambia
+  el veredicto**: no estaba en los criterios definidos antes de medir.
+- `analyze_hard_cases.py` acepta ahora también `--desde/--hasta`, igual que
+  `analyze_fase_d_run.py`.
+
+Tests: `test_active_gesture_at_tracks_last_detected_or_released`,
+`test_releases_in_window_filters_by_timestamp`,
+`test_persona_detras_active_gesture_crossing_start_is_not_acceptable` y
+`test_active_gesture_at_start_does_not_change_verdict_of_other_cases`.
+
+### d) Corrección de la afirmación sobre 2288ms
+
+Hecha en el lugar, en "Fase D, sesión 2 — preparación", sección B: la frase
+original queda tachada y debajo va la corrección, junto con el dato de
+dependencia de los fps para Fases 9/10.
+
+### Resultado de tests
+
+```
+$ ../cva-pi-repo-fase-c2-fix/.venv-fase-c2-fix/bin/python -m pytest -q
+........................................................................ [ 69%]
+................................                                         [100%]
+104 passed in 8.93s
+```
+
+Antes de esta rama eran 94 tests. Se agregaron 10 y no se quitó ninguno. El
+venv es el del worktree `cva-pi-repo-fase-c2-fix`, el mismo intérprete y las
+mismas dependencias. `models/` y `tests/fixtures_real/` se copiaron a este
+worktree; ambos están en `.gitignore` y no se versionan.
+

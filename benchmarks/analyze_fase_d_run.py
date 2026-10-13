@@ -40,9 +40,15 @@ Uso:
 `--cue` es opcional -- el archivo que guarda `fase_d_schedule.py`/
 `fase_d_hard_cases.py`. Cuando está presente, el tiempo de liberación se
 calcula desde la señal QUITA real del guion (no desde la propia detección, que
-es lo único que se podía medir antes sin esa señal) -- emparejado por orden
-(n-ésima liberación real <-> n-ésima señal QUITA), avisando explícitamente si
-los conteos no coinciden en vez de alinear a ciegas.
+es lo único que se podía medir antes sin esa señal) -- emparejado POR TIEMPO
+(corrección de la revisión de Fase D sesión 2, ver BITACORA.md "Fase D, sesión 2
+-- correcciones de herramientas"): a cada QUITA le corresponde la PRIMERA línea
+`Gesto liberado` posterior a esa QUITA y anterior al siguiente HAZ. La versión
+anterior emparejaba por orden (n-ésima liberación <-> n-ésima QUITA) y se negaba
+a calcular nada si los conteos no coincidían -- una sola liberación espuria (por
+ejemplo, durante el sostenido) o una QUITA sin liberación descartaba la batería
+entera. Ahora las QUITA sin liberación en su intervalo se cuentan y se reportan
+explícitamente, nunca se alinean a ciegas.
 """
 
 import argparse
@@ -184,6 +190,120 @@ def hand_present(gesture, extended_fingers):
     return not (gesture is None and extended_fingers == 0)
 
 
+def raw_observations_from_events(events):
+    """(ts, gesto_o_None, dedos_extendidos) por cada línea `[diag]`, en orden --
+    la secuencia cruda exacta que vio el `GestureStabilizer` real en main.py."""
+    raw = []
+    for ts, kind, data in events:
+        if kind == "diag_candidato":
+            raw.append((ts, data[0], data[2]))
+        elif kind == "diag_none":
+            raw.append((ts, None, data))
+    return raw
+
+
+def replay_stabilizer(raw_observations, stabilizer=None):
+    """Reproduce el `GestureStabilizer` real (importado tal cual, no
+    reimplementado) sobre la secuencia cruda, con `hand_present` igual que
+    main.py. Función pura (no lee archivos, no imprime) -- extraída de main()
+    para poder testear el cálculo de liberación con secuencias sintéticas.
+
+    Devuelve (confirm_events, release_events):
+    - confirm_events: (confirm_ts, gesto, t_sistema_ms) -- t_sistema desde la
+      coincidencia MÁS ANTIGUA dentro de la ventana real del algoritmo.
+    - release_events: (release_ts, gesto_liberado, last_match_ts) --
+      last_match_ts = último frame que SÍ coincidió con el gesto confirmado.
+    """
+    if stabilizer is None:
+        stabilizer = GestureStabilizer()
+    window = deque(maxlen=stabilizer._window_size)
+    confirm_events = []
+    release_events = []
+    prev_confirmed = None
+    last_match_ts = None
+    for ts, gesture, extended in raw_observations:
+        window.append((ts, gesture))
+        was_confirmed = stabilizer._confirmed
+        confirmed = stabilizer.observe(gesture, hand_present=hand_present(gesture, extended))
+        if gesture is not None and gesture == was_confirmed:
+            last_match_ts = ts
+        if confirmed is not None and confirmed != prev_confirmed:
+            matching_ts = [t for (t, g) in window if g == confirmed]
+            earliest_ts = min(matching_ts)
+            t_sistema_ms = (ts - earliest_ts).total_seconds() * 1000
+            confirm_events.append((ts, confirmed, t_sistema_ms))
+            last_match_ts = ts
+        if confirmed is None and was_confirmed is not None:
+            release_events.append((ts, was_confirmed, last_match_ts))
+        prev_confirmed = confirmed
+    return confirm_events, release_events
+
+
+def system_release_times_ms(release_events):
+    """Liberación DEL SISTEMA: último frame con el gesto confirmado -> liberación
+    reproducida. Devuelve (tiempos_ms, n_excluidas_sin_ultimo_frame).
+
+    OJO (corrección de la revisión, ver BITACORA.md): por construcción esto es
+    (cuadros sin gesto necesarios para soltar) x (periodo real entre cuadros) --
+    con mano ausente, `release_after_misses_no_hand` (16) x ~143ms a ~7fps. NO es
+    una validación independiente del contador, es el contador mismo medido en
+    tiempo; lo único que aporta el dato real es el periodo entre cuadros (fps)."""
+    times = []
+    skipped = 0
+    for release_ts, _, last_match_ts in release_events:
+        if last_match_ts is None:
+            skipped += 1
+            continue
+        times.append((release_ts - last_match_ts).total_seconds() * 1000)
+    return times, skipped
+
+
+def match_quita_to_releases(cues, release_timestamps):
+    """Empareja POR TIEMPO cada señal QUITA con la PRIMERA liberación real
+    posterior a esa QUITA y anterior al siguiente HAZ (o sin límite superior si
+    es la última QUITA del CUE). Función pura.
+
+    `cues`: (ts, rep_num, "HAZ"|"QUITA", gesto_o_None), tal cual parse_cue_log.
+    `release_timestamps`: timestamps de las líneas `Gesto liberado`.
+
+    Devuelve una lista, una entrada por QUITA, en orden:
+    (rep_num, quita_ts, release_ts_o_None, ms_o_None) -- None = esa QUITA no
+    tuvo liberación dentro de su intervalo (se reporta, no se alinea a ciegas).
+    """
+    ordered_cues = sorted(cues, key=lambda c: c[0])
+    releases = sorted(release_timestamps)
+    result = []
+    for i, (q_ts, rep_num, kind, _) in enumerate(ordered_cues):
+        if kind != "QUITA":
+            continue
+        next_haz_ts = next((c[0] for c in ordered_cues[i + 1:] if c[2] == "HAZ"), None)
+        match = next(
+            (r for r in releases if r > q_ts and (next_haz_ts is None or r < next_haz_ts)),
+            None,
+        )
+        ms = (match - q_ts).total_seconds() * 1000 if match is not None else None
+        result.append((rep_num, q_ts, match, ms))
+    return result
+
+
+def summarize_ms(values):
+    """avg/p50/p95/max/min/n -- percentiles por rango más cercano sobre la
+    lista ordenada (mismo criterio que el resto de Fase D: p50 = elemento n//2,
+    p95 = elemento int(0.95*n)-1 si n>=5, si no el máximo). None si vacío."""
+    if not values:
+        return None
+    vals = sorted(values)
+    n = len(vals)
+    return {
+        "n": n,
+        "avg": sum(vals) / n,
+        "p50": vals[n // 2],
+        "p95": vals[int(0.95 * n) - 1] if n >= 5 else vals[-1],
+        "max": vals[-1],
+        "min": vals[0],
+    }
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("log_path", nargs="?", default="benchmarks/fase_d_run_sin_condicion.log")
@@ -237,34 +357,8 @@ def main():
     # sistema; y en cada liberación, el timestamp del último frame que SÍ
     # coincidió con el gesto confirmado (para el tiempo de liberación "del
     # sistema", sin reacción humana). ---
-    raw_observations = []  # (ts, gesture, extended_fingers)
-    for ts, kind, data in events:
-        if kind == "diag_candidato":
-            raw_observations.append((ts, data[0], data[2]))
-        elif kind == "diag_none":
-            raw_observations.append((ts, None, data))
-
-    stabilizer = GestureStabilizer()
-    window = deque(maxlen=stabilizer._window_size)
-    confirm_events = []  # (confirm_ts, gesture, t_sistema_ms)
-    release_events = []  # (release_ts, gesture_liberado, last_match_ts)
-    prev_confirmed = None
-    last_match_ts = None  # timestamp de la última observación == confirmado actual
-    for ts, gesture, extended in raw_observations:
-        window.append((ts, gesture))
-        was_confirmed = stabilizer._confirmed
-        confirmed = stabilizer.observe(gesture, hand_present=hand_present(gesture, extended))
-        if gesture is not None and gesture == was_confirmed:
-            last_match_ts = ts
-        if confirmed is not None and confirmed != prev_confirmed:
-            matching_ts = [t for (t, g) in window if g == confirmed]
-            earliest_ts = min(matching_ts)
-            t_sistema_ms = (ts - earliest_ts).total_seconds() * 1000
-            confirm_events.append((ts, confirmed, t_sistema_ms))
-            last_match_ts = ts
-        if confirmed is None and was_confirmed is not None:
-            release_events.append((ts, was_confirmed, last_match_ts))
-        prev_confirmed = confirmed
+    raw_observations = raw_observations_from_events(events)
+    confirm_events, release_events = replay_stabilizer(raw_observations)
 
     print(f"Confirmaciones reproducidas con el GestureStabilizer real: {len(confirm_events)}")
     if len(confirm_events) != len(reps):
@@ -322,13 +416,7 @@ def main():
     # liberación (sin reacción humana), derivada del log crudo solo (no
     # necesita CUE). Si last_match_ts es None para algún evento (no debería
     # pasar salvo log truncado), se excluye y se avisa.
-    system_release_times = []
-    skipped_no_last_match = 0
-    for release_ts, _, last_match_ts in release_events:
-        if last_match_ts is None:
-            skipped_no_last_match += 1
-            continue
-        system_release_times.append((release_ts - last_match_ts).total_seconds() * 1000)
+    system_release_times, skipped_no_last_match = system_release_times_ms(release_events)
     if system_release_times:
         n4 = len(system_release_times)
         avg4 = sum(system_release_times) / n4
@@ -354,23 +442,26 @@ def main():
         quita_cues = [c for c in cues if c[2] == "QUITA"]
         print(f"\n=== CUE log: {args.cue_path} ({len(haz_cues)} HAZ, {len(quita_cues)} QUITA) ===")
 
-        releases_only = [(ts, data) for ts, kind, data in events if kind == "liberado"]
-        if len(releases_only) == len(quita_cues):
-            release_from_cue = [
-                (r_ts - q_ts).total_seconds() * 1000
-                for (r_ts, _), (q_ts, _, _, _) in zip(releases_only, quita_cues)
-            ]
-            n2 = len(release_from_cue)
+        release_ts_list = [ts for ts, kind, _ in events if kind == "liberado"]
+        pairs = match_quita_to_releases(cues, release_ts_list)
+        without_release = [(rep, q_ts) for rep, q_ts, r_ts, _ in pairs if r_ts is None]
+        release_from_cue = [ms for _, _, _, ms in pairs if ms is not None]
+        print("Emparejamiento QUITA <-> liberación POR TIEMPO (primera liberación después de la QUITA y antes del siguiente HAZ):")
+        for rep, q_ts, r_ts, ms in pairs:
+            r_txt = r_ts.strftime('%H:%M:%S,%f')[:-3] if r_ts else "-- SIN liberación en el intervalo"
+            ms_txt = f"{ms:7.0f}ms" if ms is not None else ""
+            print(f"  QUITA [{rep:2d}] {q_ts.strftime('%H:%M:%S,%f')[:-3]} -> {r_txt} {ms_txt}")
+        print(f"QUITA sin liberación en su intervalo: {len(without_release)}/{len(pairs)}"
+              + (f" (reps {[rep for rep, _ in without_release]})" if without_release else ""))
+        stats = summarize_ms(release_from_cue)
+        if stats:
             print(
-                f"Tiempo de liberación desde la señal QUITA real -- n={n2} "
-                f"avg={sum(release_from_cue)/n2:.0f}ms min={min(release_from_cue):.0f}ms "
-                f"max={max(release_from_cue):.0f}ms"
+                f"Tiempo de liberación desde la señal QUITA real -- n={stats['n']} "
+                f"avg={stats['avg']:.0f}ms p50={stats['p50']:.0f}ms p95={stats['p95']:.0f}ms "
+                f"max={stats['max']:.0f}ms min={stats['min']:.0f}ms"
             )
         else:
-            print(
-                f"AVISO: {len(releases_only)} liberaciones reales vs {len(quita_cues)} "
-                f"señales QUITA -- no coinciden, no se calcula"
-            )
+            print("Tiempo de liberación desde la señal QUITA real -- sin ninguna QUITA emparejada, no se calcula")
 
         detections_only = [(r["detect_ts"], r["gesture"]) for r in reps if not r["contaminated"]]
         if len(detections_only) == len(haz_cues):
