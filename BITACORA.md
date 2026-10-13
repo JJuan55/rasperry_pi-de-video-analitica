@@ -2777,3 +2777,153 @@ venv es el del worktree `cva-pi-repo-fase-c2-fix`, el mismo intérprete y las
 mismas dependencias. `models/` y `tests/fixtures_real/` se copiaron a este
 worktree; ambos están en `.gitignore` y no se versionan.
 
+
+## Fase D, sesión 2 — resultados (2026-10-13, condición 50cm, contra el servicio real)
+
+Medido directo contra el servicio de producción (`main` = `2b74314`, puerto
+8766), con el cliente real conectado por el túnel SSH. Ni el servicio ni la
+configuración se tocaron. Los análisis usan las herramientas ya corregidas
+(rama `fase-d-herramientas-fix`, commit `4ac079e`). Sobre el log de producción
+solo hubo lectura; los CUE no se modificaron (están en `.gitignore` y no se
+versionan).
+
+**Datos de la sesión que debe dar JD (pendientes al escribir esto):**
+- Sensibilidad del cliente: **no indicada todavía**. No existe ese ajuste en
+  ningún archivo de este repo ni en `reference/`, así que no se puede deducir
+  desde la Pi.
+- Caso 1: el dato recibido es "8 cambios en orden, 2 rondas". **Falta confirmar
+  si son 8 cambios en total o 8 por ronda (16)**, y qué orden se usó. De eso
+  depende el juicio humano del caso 1 (ver abajo).
+
+### CUE y ventanas usadas (primer CUE − 1 s → último CUE + 10 s)
+
+| Corrida | CUE | Primer CUE | Último CUE (`FIN`) | Ventana analizada |
+|---|---|---|---|---|
+| Liberación (20 reps) | `benchmarks/fase_d_cue_50cm_liberacion_20261013_184008.log` | 18:40:18,433 | 18:42:58,446 | 18:40:17,433 → 18:43:08,446 |
+| Casos difíciles | `benchmarks/fase_d_cue_hard_cases_20261013_184738.log` | 18:47:38,615 | 18:50:58,618 | 18:47:37,615 → 18:51:08,618 |
+
+**Corrida de casos difíciles descartada:** existe además
+`fase_d_cue_hard_cases_20261013_184639.log`, que llega solo hasta
+`ARRANCA caso 'mano_tapada_palma_abierta'` (18:47:29) y no tiene `TERMINA` ni
+`FIN`. Se cortó a mitad del caso 2 y JD la relanzó a las 18:47:38. **No se
+analiza.** La ventana usada empieza después de su corte.
+
+Comandos (desde `~/video_analitica/cva-pi-repo-fase-d-fix`, con el venv de
+`cva-pi-repo-fase-c2-fix`):
+```
+analyze_fase_d_run.py  <log prod> --cue benchmarks/fase_d_cue_50cm_liberacion_20261013_184008.log --desde "2026-10-13 18:40:17,433" --hasta "2026-10-13 18:43:08,446"
+analyze_hard_cases.py  <log prod> benchmarks/fase_d_cue_hard_cases_20261013_184738.log --desde "2026-10-13 18:47:37,615" --hasta "2026-10-13 18:51:08,618"
+```
+
+### Corrida 1 — liberación desde QUITA (salida literal)
+
+```
+QUITA sin liberación en su intervalo: 3/20 (reps [3, 7, 15])
+Tiempo de liberación desde la señal QUITA real -- n=17 avg=3715ms p50=3669ms p95=4558ms max=4975ms min=3077ms
+```
+
+| Métrica | Valor |
+|---|---|
+| n (QUITA emparejadas) | 17 de 20 |
+| promedio | 3715 ms |
+| p50 | 3669 ms |
+| p95 | 4558 ms |
+| máx | 4975 ms |
+| mín | 3077 ms |
+
+**Advertencia de sesgo:** la tabla está **sesgada hacia abajo**. Las 3 QUITA
+"sin liberación" (reps 3, 7 y 15) sí tuvieron liberación, pero llegó
+**después** del siguiente HAZ, así que por regla quedan fuera del
+emparejamiento. Estas son las líneas literales del log de producción:
+```
+CUE  18:40:37,434 [3/20] QUITA   -> log 18:40:43,007 Gesto liberado (antes: puño_cerrado)    -- HAZ [4] a las 18:40:42,435
+CUE  18:41:09,438 [7/20] QUITA   -> log 18:41:15,332 Gesto liberado (antes: palma_abierta)   -- HAZ [8] a las 18:41:14,438
+CUE  18:42:13,442 [15/20] QUITA  -> log 18:42:18,780 Gesto liberado (antes: dedo_pulgar)     -- HAZ [16] a las 18:42:18,444
+```
+De esas líneas sale una diferencia QUITA→liberado de ≈5,6 s, ≈5,9 s y ≈5,3 s:
+las tres más lentas de la batería, todas por encima del intervalo de 5 s del
+guion. **No entran en la tabla** porque la herramienta no las empareja.
+Conclusión que sí se sostiene: en 3 de 20 repeticiones (15%) la liberación
+tardó más que los 5 s que el guion deja con la mano fuera, y el máximo real de
+la batería es **≈5,9 s, no 4975 ms**.
+
+Otros datos de la misma salida, para contexto (no son lo pedido en la tabla):
+```
+Tiempo de sistema -- avg=519ms p50=525ms p95=599ms max=660ms min=222ms
+Repeticiones que superan AC3 (<1500ms): 0/21
+Tiempo de liberación DEL SISTEMA (...) -- n=21 avg=2424ms p50=2311ms max=4343ms min=2195ms
+```
+El fps real en la ventana fue de 6,94 a 7,00 (1203 líneas `Frame`), así que
+el piso de liberación por construcción es ≈16 × 143 ms ≈ 2,3 s, como se
+corrigió arriba. El máximo de 4343 ms de la liberación del sistema no es la
+regla de 16 cuadros: cuadra con el umbral de 20 cuadros (mano presente pero
+ambigua) más algún cuadro con forma ambigua que reinicia o retrasa la cuenta.
+**No se investigó cuál repetición fue; queda abierto.**
+
+**Gestos equivocados confirmados durante la batería** (visibles en la salida
+literal, marcados CONTAMINADA):
+```
+[   28] 18:40:21,233 puño_cerrado   conf=1.00   (HAZ [1] puño_cerrado)
+[   37] 18:40:22,341 dedo_menique   conf=0.99 CONTAMINADA
+[  200] 18:40:45,614 dedo_pulgar    conf=1.00   (HAZ [4] puño_cerrado)
+[  213] 18:40:46,608 puño_cerrado   conf=1.00 CONTAMINADA
+```
+En 2 de 20 repeticiones (las dos de `puño_cerrado`) se envió un gesto
+distinto al pedido, durante ~1 s. En la rep 1, `dedo_menique` llegó después del
+puño correcto. En la rep 4, `dedo_pulgar` llegó antes que el puño correcto.
+Queda como dato real de precisión, sin explicación todavía.
+
+### Corrida 2 — casos difíciles
+
+| Caso | Objetivo | Activo al empezar | Líneas enviadas en el bloque | Liberaciones | Veredicto |
+|---|---|---|---|---|---|
+| 1. movimiento_rapido | (cualquiera) | ninguno | 16 (ver abajo) | 1 | **No verificable** automáticamente; juicio humano pendiente del dato de JD |
+| 2. mano_tapada_palma_abierta | palma_abierta | ninguno | `18:48:32,162 palma_abierta (0.98)` | 0 | **OK** |
+| 3. mano_en_el_borde_puno_cerrado | puño_cerrado | ninguno | `18:49:12,699 puño_cerrado (1.00)` | 0 | **OK** |
+| 4. dos_manos_dedo_pulgar | dedo_pulgar | ninguno | `18:49:50,627 palma_abierta (0.99)`, `18:49:53,766 dedo_pulgar (0.99)` | 0 | **FALLA** |
+| 5. persona_detras_sin_gesto | (nada) | ninguno | `18:50:44,288 dedo_pulgar (0.76)` | 1 (`18:50:53,027`) | **FALLA** |
+
+**Caso 1**: las 16 líneas enviadas, en orden (salida literal):
+`puño_cerrado, palma_abierta, dedo_menique, dedo_pulgar, puño_cerrado,
+palma_abierta, dedo_pulgar, puño_cerrado, dedo_pulgar, palma_abierta,
+dedo_menique, palma_abierta, dedo_pulgar, dedo_menique, puño_cerrado,
+palma_abierta`, más 1 liberación (`18:48:03,386`, antes: `dedo_pulgar`).
+Ninguna línea quedó fuera de la ventana del bloque. Si fueron 16 cambios
+reales (8 por ronda × 2), el conteo coincide 1:1. Si fueron 8 en total, el
+sistema envió el doble. **Además, la secuencia enviada no sigue un ciclo fijo
+de los 4 gestos**: hay pares invertidos (`dedo_menique` antes de `dedo_pulgar`)
+y gestos que faltan dentro de un ciclo. Esto puede ser una confirmación de
+gestos intermedios o simplemente el orden real de JD. Solo se puede juzgar
+con su confirmación del protocolo usado.
+
+**Caso 4**: primero se confirmó y envió `palma_abierta` (la otra mano, abierta),
+y 3,1 s después `dedo_pulgar`. Según el criterio fijado antes de medir,
+enviar un gesto distinto al objetivo es NO aceptable. Qué mano eligió el
+detector **no es verificable** (`num_hands=1`).
+
+**Caso 5**: la línea **sí salió por el socket**: confianza 0.76 ≥
+`MIN_CONFIDENCE` = 0.5 (`config.py:41`, sin override en el EnvironmentFile
+del servicio), así que la salvedad del proxy no aplica aquí. En los cuadros
+crudos anteriores (18:50:42,7 → 18:50:44,3) hay una mano real: 4 cuadros de
+`palma_abierta` con 5 dedos, luego `dedo_pulgar` con 1 dedo, hasta confirmar.
+Después siguen cuadros de `puño_cerrado`, y se libera a las 18:50:53,027. **El
+log no permite saber si esa mano era de la persona que pasaba o la de JD.**
+Hace falta el relato de JD. Por el criterio fijado (cualquier gesto enviado =
+NO aceptable), el veredicto es FALLA de todos modos. El estado activo al
+empezar fue "ninguno": el `palma_abierta` de JD al salir del caso 4 se liberó a
+las 18:50:26,460, antes del ARRANCA (18:50:28,618).
+
+### Brechas abiertas
+
+- **Sin segunda persona de otro tono de piel**: sigue abierta. La persona del
+  caso 5 pasó por detrás; no hizo los gestos del catálogo.
+- **Solo 50 cm**: las distancias media y lejana siguen aplazadas por decisión
+  de JD.
+- **Solo hasta el envío desde la Pi**: no incluye la red del túnel SSH ni el
+  pintado en el cliente.
+- Las 3 liberaciones más lentas quedan fuera de la tabla por la regla de
+  emparejamiento (ver arriba). Si se quiere tenerlas en la tabla, la próxima
+  batería necesita más de 5 s fuera de cuadro.
+- El máximo de 4343 ms de la liberación del sistema y los 2 gestos
+  equivocados de la batería no se investigaron.
+- Sensibilidad del cliente y protocolo exacto del caso 1: pendientes de JD.
