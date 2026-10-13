@@ -2927,3 +2927,75 @@ las 18:50:26,460, antes del ARRANCA (18:50:28,618).
 - El máximo de 4343 ms de la liberación del sistema y los 2 gestos
   equivocados de la batería no se investigaron.
 - Sensibilidad del cliente y protocolo exacto del caso 1: pendientes de JD.
+
+## Fase D, sesión 2 — repetición guiada de los casos 1, 4 y 5 (preparación, sin medir todavía)
+
+Pedido de JD después de los resultados. Repite solo los tres casos que no
+pasaron (1 no verificable, 4 y 5 FALLA), con instrucciones más claras. JD aportó
+este contexto de la primera corrida:
+
+- **Caso 1:** JD se descoordinó al cambiar de gesto. Dejó la mano en cuadro y
+  solo cambió de gesto. Sin una señal por cada cambio, el criterio no se podía
+  verificar.
+- **Caso 4:** la configuración toma una sola mano de referencia, y la segunda
+  no cuenta hasta que la principal sale de cuadro. **Verificado en el código:**
+  `detector.py:367-371`, `RunningMode.VIDEO` + `num_hands=1` +
+  `min_tracking_confidence`. MediaPipe sigue a la mano ya detectada en vez de
+  volver a detectar en cada cuadro. En la corrida 1, `palma_abierta` se
+  confirmó **antes** que `dedo_pulgar`, lo que cuadra con que la mano abierta
+  fue la primera en ser detectada. Esto **no cambia** el veredicto FALLA de esa
+  corrida (fue con el criterio fijado entonces), pero sí muestra que el caso
+  estaba mal planteado: no fijaba qué mano entraba primero.
+
+### Cambios en las herramientas
+
+`benchmarks/fase_d_hard_cases.py`:
+- `--casos a,b,c`: corre solo los casos indicados, en el orden fijo de
+  `CASES`. Un nombre desconocido da error explícito.
+- Señales dentro del bloque (`build_case_steps()`, función pura):
+  - **Caso 1:** `CAMBIA [i/16] a: <gesto>` cada 2 s. Son 2 rondas de 8 cambios
+    en orden fijo (puño, palma, pulgar, meñique, dos veces por ronda), en un
+    bloque de 32 s. La mano se queda en cuadro todo el bloque.
+  - **Caso 4:** al ARRANCA entra **solo** la mano del pulgar. A los 8 s llega
+    la señal `METE la segunda mano ABIERTA`, que entra sin tapar la primera.
+    La mano del pulgar no sale en ningún momento.
+  - **Caso 5:** señales `PASA [1/2]` y `PASA [2/2]` a los 5 s y a los 18 s. Las
+    manos de JD quedan fuera de cuadro desde PREPARA, y la segunda persona
+    cruza con los brazos abajo.
+
+`benchmarks/analyze_hard_cases.py`:
+- `parse_inner_cues()` lee las señales CAMBIA, METE y PASA.
+- `evaluate_guided_changes()` (función pura) evalúa el caso 1.
+
+### Criterios, definidos ANTES de medir
+
+- **Caso 1 (guiado):** cada envío se asigna a la señal CAMBIA más reciente
+  **del mismo gesto**, anterior al envío y a no más de 4 s (2 × el intervalo).
+  - **OK** = ningún envío sin asignar (gesto no pedido, como un gesto
+    intermedio al pasar de una forma a otra, o un envío fuera de tolerancia) y
+    ningún cambio con más de un envío.
+  - Los cambios sin envío **se reportan y se cuentan, pero no hacen FALLA**: el
+    criterio fijado desde el principio es "no más de un envío por cambio real,
+    nada fuera de la ventana", no "detectar todos".
+  - **Ojo:** un OK con muchos cambios sin envío no dice que el sistema siga el
+    ritmo. Hay que leerlo junto con el conteo `k/16 cambios con envío`.
+- **Caso 4:** sin cambios. Aceptable = nada, o solo `dedo_pulgar`. Se reporta
+  además la hora de la señal METE, para separar lo que pasó antes y después de
+  meter la segunda mano.
+- **Caso 5:** sin cambios. Cualquier línea enviada, o un gesto activo al
+  empezar, es NO aceptable. Se reportan las horas de las señales PASA.
+
+### Tests
+
+```
+111 passed in 9.61s
+```
+Son 7 tests nuevos sobre los 104 anteriores: selección de casos, señales de
+cada caso, parseo de las señales internas (con la regex de ARRANCA todavía
+compatible), y caso 1 guiado (un envío por cambio con un cambio sin envío
+= OK; gesto intermedio no pedido = NO ACEPTABLE; envío repetido = NO
+ACEPTABLE; envío fuera de tolerancia = sin asignar).
+
+Ensayo en seco del guion con el tiempo acelerado (CUE escrito en el
+scratchpad, no en `benchmarks/`): genera las 16 señales CAMBIA, la señal METE
+y las 2 PASA, y el análisis las lee sin errores.

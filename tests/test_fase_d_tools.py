@@ -369,3 +369,101 @@ def test_active_gesture_at_start_does_not_change_verdict_of_other_cases():
         "mano_tapada_palma_abierta", "palma_abierta", [], active_at_start="puño_cerrado"
     )
     assert ok is True
+
+
+# --- Repetición guiada de los casos 1, 4 y 5 --------------------------------
+
+import fase_d_hard_cases as fhc  # noqa: E402
+
+
+def test_select_cases_keeps_fixed_order_and_rejects_unknown():
+    sel = fhc.select_cases("persona_detras_sin_gesto,movimiento_rapido,dos_manos_dedo_pulgar")
+    assert [c[0] for c in sel] == ["movimiento_rapido", "dos_manos_dedo_pulgar", "persona_detras_sin_gesto"]
+    assert len(fhc.select_cases(None)) == 5
+    import pytest
+    with pytest.raises(ValueError):
+        fhc.select_cases("movimiento_rapido,no_existe")
+
+
+def test_build_case_steps_movimiento_rapido_two_rounds_of_eight_in_order():
+    steps, block = fhc.build_case_steps("movimiento_rapido")
+    assert len(steps) == 16
+    assert block == 16 * fhc.CHANGE_SECONDS
+    assert [s[0] for s in steps] == [i * fhc.CHANGE_SECONDS for i in range(16)]
+    gestures = [s[1].split("a: ")[1] for s in steps]
+    assert gestures == fhc.CHANGE_ORDER * 4
+    assert steps[0][1] == "CAMBIA [1/16] a: puño_cerrado"
+    # dos gestos consecutivos nunca son iguales: cada señal es un cambio real
+    assert all(a != b for a, b in zip(gestures, gestures[1:]))
+
+
+def test_build_case_steps_dos_manos_and_persona_detras():
+    steps, block = fhc.build_case_steps("dos_manos_dedo_pulgar")
+    assert block == fhc.BLOCK_SECONDS
+    assert len(steps) == 1 and steps[0][0] == fhc.SECOND_HAND_AT_SECONDS
+    assert steps[0][1].startswith("METE")
+    steps, _ = fhc.build_case_steps("persona_detras_sin_gesto")
+    assert [s[0] for s in steps] == list(fhc.PERSON_PASSES_AT_SECONDS)
+    assert all(s[1].startswith("PASA") for s in steps)
+    assert fhc.build_case_steps("mano_tapada_palma_abierta") == ([], fhc.BLOCK_SECONDS)
+
+
+def test_parse_inner_cues_and_arranca_still_parses(tmp_path):
+    cue = tmp_path / "cue.log"
+    cue.write_text(
+        "2026-10-13 10:00:10,000 CUE: ARRANCA caso 'movimiento_rapido' (objetivo=None) -- bloque de 32s\n"
+        "2026-10-13 10:00:10,001 CUE: CAMBIA [1/16] a: puño_cerrado\n"
+        "2026-10-13 10:00:12,000 CUE: CAMBIA [2/16] a: palma_abierta\n"
+        "2026-10-13 10:00:42,000 CUE: TERMINA caso 'movimiento_rapido'\n"
+        "2026-10-13 10:00:58,000 CUE: METE la segunda mano ABIERTA (sin sacar la del pulgar)\n"
+        "2026-10-13 10:01:40,000 CUE: PASA [1/2] -- la otra persona cruza detrás, brazos abajo\n",
+        encoding="utf-8",
+    )
+    inner = ahc.parse_inner_cues(str(cue))
+    assert [(k, g) for _, k, g in inner][:2] == [("CAMBIA", "puño_cerrado"), ("CAMBIA", "palma_abierta")]
+    assert [k for _, k, _ in inner][2:] == ["METE", "PASA"]
+    cases = ahc.parse_hard_case_cue_log(str(cue))
+    assert cases[0][0] == "movimiento_rapido" and cases[0][1] is None
+
+
+def _changes(*gestures, every=2.0):
+    return [(_ts(i * every), g) for i, g in enumerate(gestures)]
+
+
+def test_guided_changes_one_send_per_change_is_ok_and_missed_change_is_not_failure():
+    changes = _changes("puño_cerrado", "palma_abierta", "dedo_pulgar", "dedo_menique")
+    dets = [
+        (_ts(0.9), "puño_cerrado", 1.0),
+        (_ts(2.8), "palma_abierta", 1.0),
+        # dedo_pulgar (cambio 3) nunca se confirmó
+        (_ts(7.1), "dedo_menique", 1.0),
+    ]
+    ok, summary = ahc.evaluate_guided_changes(changes, dets)
+    assert ok is True
+    assert [i for i, _ in summary["asignados"]] == [1, 2, 4]
+    assert summary["sin_envio"] == [3]
+    assert round(summary["asignados"][0][1]) == 900
+
+
+def test_guided_changes_wrong_gesture_and_duplicate_are_not_acceptable():
+    changes = _changes("puño_cerrado", "palma_abierta")
+    # gesto intermedio no pedido (dedo_pulgar) al pasar de puño a palma
+    ok, summary = ahc.evaluate_guided_changes(
+        changes, [(_ts(0.8), "puño_cerrado", 1.0), (_ts(2.4), "dedo_pulgar", 0.9), (_ts(2.9), "palma_abierta", 1.0)]
+    )
+    assert ok is False
+    assert summary["sin_asignar"] == [(_ts(2.4), "dedo_pulgar")]
+    # el mismo cambio enviado dos veces (ida y vuelta del mismo gesto)
+    ok, summary = ahc.evaluate_guided_changes(
+        changes, [(_ts(0.8), "puño_cerrado", 1.0), (_ts(1.5), "puño_cerrado", 1.0)]
+    )
+    assert ok is False
+    assert summary["duplicados"] == [(1, _ts(1.5), "puño_cerrado")]
+
+
+def test_guided_changes_send_beyond_tolerance_is_unassigned():
+    changes = _changes("puño_cerrado", "palma_abierta")
+    late = 2 * fhc.CHANGE_SECONDS + 0.5
+    ok, summary = ahc.evaluate_guided_changes(changes, [(_ts(late), "puño_cerrado", 1.0)])
+    assert ok is False
+    assert summary["sin_asignar"] == [(_ts(late), "puño_cerrado")]

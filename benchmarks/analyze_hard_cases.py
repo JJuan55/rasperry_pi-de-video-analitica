@@ -29,6 +29,18 @@ En todos los casos se reporta además (sin cambiar el veredicto de los casos 1-4
   permite -- no lo permite (MediaPipe con num_hands=1 no distingue cuál mano
   física eligió), así que se dice explícitamente que no es verificable.
 
+Repetición guiada (después de la primera corrida, ver BITACORA.md "Fase D,
+sesión 2 -- repetición guiada"): si el CUE trae señales `CAMBIA [i/n] a: <gesto>`
+dentro del caso 1, el caso 1 SÍ se evalúa, con un criterio definido ANTES de
+medir: cada envío se asigna a la señal CAMBIA más reciente del MISMO gesto,
+anterior al envío y a no más de MATCH_TOLERANCE_SECONDS. OK = ningún envío sin
+asignar (gesto no pedido o fuera de tolerancia) y ninguna señal con más de un
+envío. Las señales sin envío (cambio no confirmado) se cuentan y se reportan
+pero no hacen FALLA: el criterio fijado es "no más de un envío por cambio
+real, nada fuera de la ventana", no "detectar todos". Sin señales CAMBIA (CUE
+viejo), el caso 1 sigue como no verificable. Las señales `METE` (caso 4) y
+`PASA` (caso 5) solo se reportan con su hora; no cambian el veredicto.
+
 Reutiliza el descubrimiento de rotación y el parseo de eventos de
 `analyze_fase_d_run.py` -- no reimplementa esa lógica aparte. No se importa
 desde el paquete.
@@ -56,10 +68,17 @@ from analyze_fase_d_run import (  # noqa: E402
     read_lines_with_rotation,
 )
 
+CAMBIA_RE = re.compile(r"CUE: CAMBIA \[(\d+)/(\d+)\] a: (\S+)")
+INNER_RE = re.compile(r"CUE: (METE|PASA)\b(.*)$")
 ARRANCA_RE = re.compile(r"CUE: ARRANCA caso '(\w+)' \(objetivo=(\S+)\)")
 TERMINA_RE = re.compile(r"CUE: TERMINA caso '(\w+)'")
 
 NO_VERIFICABLE_AUTOMATICO = "movimiento_rapido"
+
+# Tolerancia del caso 1 guiado: 2 x el intervalo entre señales CAMBIA del guion.
+from fase_d_hard_cases import CHANGE_SECONDS  # noqa: E402
+
+MATCH_TOLERANCE_SECONDS = 2 * CHANGE_SECONDS
 CUALQUIER_ENVIO_NO_ACEPTABLE = "persona_detras_sin_gesto"
 
 
@@ -85,6 +104,62 @@ def parse_hard_case_cue_log(path):
                     start_ts, target = pending_start.pop(name)
                     cases.append((name, target, start_ts, ts))
     return cases
+
+
+def parse_inner_cues(path):
+    """Señales DENTRO de los bloques: (ts, "CAMBIA", gesto) y (ts, "METE"|"PASA",
+    texto), en orden de archivo."""
+    inner = []
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            ts = parse_ts(line)
+            if ts is None:
+                continue
+            m = CAMBIA_RE.search(line)
+            if m:
+                inner.append((ts, "CAMBIA", m.group(3)))
+                continue
+            m = INNER_RE.search(line)
+            if m:
+                inner.append((ts, m.group(1), m.group(2).strip()))
+    return inner
+
+
+def evaluate_guided_changes(changes, dets, tolerance_s=None):
+    """Caso 1 guiado. `changes`: [(ts, gesto_pedido)] en orden; `dets`:
+    [(ts, gesto_enviado, confianza)]. Función pura.
+
+    Cada envío se asigna a la señal CAMBIA más reciente del MISMO gesto,
+    anterior o igual al envío, y a no más de `tolerance_s`. Devuelve
+    (ok, resumen) con resumen = dict(asignados=[(i_cambio, ms)],
+    sin_asignar=[(ts, gesto)], duplicados=[(i_cambio, ts, gesto)],
+    sin_envio=[i_cambio]). Índices de cambio desde 1."""
+    if tolerance_s is None:
+        tolerance_s = MATCH_TOLERANCE_SECONDS
+    matched = {}
+    unmatched = []
+    duplicates = []
+    for ts, gesture, _ in sorted(dets, key=lambda d: d[0]):
+        candidate = None
+        for i in range(len(changes) - 1, -1, -1):
+            c_ts, c_gesture = changes[i]
+            if c_ts <= ts and c_gesture == gesture:
+                candidate = i
+                break
+        if candidate is None or (ts - changes[candidate][0]).total_seconds() > tolerance_s:
+            unmatched.append((ts, gesture))
+        elif candidate in matched:
+            duplicates.append((candidate + 1, ts, gesture))
+        else:
+            matched[candidate] = (ts - changes[candidate][0]).total_seconds() * 1000
+    summary = {
+        "asignados": sorted((i + 1, ms) for i, ms in matched.items()),
+        "sin_asignar": unmatched,
+        "duplicados": duplicates,
+        "sin_envio": [i + 1 for i in range(len(changes)) if i not in matched],
+    }
+    ok = not unmatched and not duplicates
+    return ok, summary
 
 
 def detections_in_window(events, start_ts, end_ts):
@@ -173,6 +248,7 @@ def main():
     hasta = parse_window_ts(args.hasta) if args.hasta else None
 
     cases = parse_hard_case_cue_log(args.cue_path)
+    inner_cues = parse_inner_cues(args.cue_path)
     files_used = discover_rotated_logs(args.log_path) or [args.log_path]
     all_events = build_events(read_lines_with_rotation(args.log_path))
     window_events = [
@@ -191,16 +267,47 @@ def main():
         rels = releases_in_window(window_events, start_ts, end_ts)
         active = active_gesture_at(all_events, start_ts)
         ok, detail = evaluate_case(name, target, dets, active_at_start=active)
+        inner_here = [c for c in inner_cues if start_ts <= c[0] <= end_ts]
+        changes = [(ts, g) for ts, kind, g in inner_here if kind == "CAMBIA"]
+        guided_summary = None
+        if name == NO_VERIFICABLE_AUTOMATICO and changes:
+            ok, guided_summary = evaluate_guided_changes(changes, dets)
+            detail = (
+                f"{len(dets)} envío(s) para {len(changes)} cambios pedidos -- "
+                + ("aceptable: ningún envío fuera de lo pedido y ninguno repetido por cambio" if ok
+                   else "NO ACEPTABLE: hay envíos sin asignar a un cambio pedido o repetidos")
+            )
         veredicto = "N/A (no verificable)" if ok is None else ("OK" if ok else "FALLA")
         print(f"=== {name} (objetivo={target}) -- {veredicto} ===")
         print(f"  ventana: {start_ts.strftime('%H:%M:%S,%f')[:-3]} -- {end_ts.strftime('%H:%M:%S,%f')[:-3]}")
         print(f"  gesto activo al empezar el bloque: {active or 'ninguno'}")
+        for ts, kind, txt in inner_here:
+            if kind != "CAMBIA":
+                print(f"  señal    {ts.strftime('%H:%M:%S,%f')[:-3]}  {kind} {txt}")
         for ts, g, conf in dets:
             print(f"  enviado {ts.strftime('%H:%M:%S,%f')[:-3]}  Gesto detectado: {g} (confianza={conf:.2f})")
         for ts, g in rels:
             print(f"  liberado {ts.strftime('%H:%M:%S,%f')[:-3]}  Gesto liberado (antes: {g})")
         print(f"  liberaciones dentro del bloque: {len(rels)}")
         print(f"  {detail}")
+        if guided_summary is not None:
+            print(f"  tolerancia de asignación: {MATCH_TOLERANCE_SECONDS:.1f}s desde la señal CAMBIA del mismo gesto")
+            for i, ms in guided_summary["asignados"]:
+                c_ts, c_g = changes[i - 1]
+                print(f"    cambio [{i:2d}] {c_ts.strftime('%H:%M:%S,%f')[:-3]} {c_g:14s} -> enviado a los {ms:5.0f}ms (incluye reacción humana)")
+            for i in guided_summary["sin_envio"]:
+                c_ts, c_g = changes[i - 1]
+                print(f"    cambio [{i:2d}] {c_ts.strftime('%H:%M:%S,%f')[:-3]} {c_g:14s} -> SIN envío")
+            for ts, g in guided_summary["sin_asignar"]:
+                print(f"    envío SIN ASIGNAR {ts.strftime('%H:%M:%S,%f')[:-3]} {g}")
+            for i, ts, g in guided_summary["duplicados"]:
+                print(f"    envío REPETIDO para el cambio [{i}] {ts.strftime('%H:%M:%S,%f')[:-3]} {g}")
+            print(
+                f"  resumen: {len(guided_summary['asignados'])}/{len(changes)} cambios con envío, "
+                f"{len(guided_summary['sin_envio'])} sin envío, "
+                f"{len(guided_summary['sin_asignar'])} envío(s) sin asignar, "
+                f"{len(guided_summary['duplicados'])} repetido(s)"
+            )
         if name == "dos_manos_dedo_pulgar":
             print(
                 "  Cuál de las dos manos eligió el detector: NO verificable -- "
