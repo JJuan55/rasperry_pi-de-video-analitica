@@ -3147,7 +3147,7 @@ desde `993d0ea`. **Producción:** sin cambios en `2b74314`; solo se leyó.
 | Caso 2, mano tapada | OK |
 | Caso 3, mano en el borde | OK |
 | Caso 4, dos manos (en orden) | OK en la repetición; FALLA en la primera corrida, que estaba mal planteada |
-| Caso 5, persona detrás | FALLA en las dos corridas; según JD fue su propia mano |
+| Caso 5, persona detrás | FALLA en las dos primeras corridas (según JD, su propia mano); **OK en la repetición limpia de las 19:19** (ver abajo) |
 
 ### Datos de diseño para Fases 9/10 (no se cambia nada en esta fase)
 - La liberación depende de los fps: 16 cuadros sin mano equivalen a ~2 s a
@@ -3167,7 +3167,7 @@ desde `993d0ea`. **Producción:** sin cambios en `2b74314`; solo se leyó.
 - El emparejamiento HAZ ↔ detección sigue siendo por orden.
 
 ### Pendiente (decisión de JD, 2026-10-13: cerrar la sesión aquí)
-- [ ] **Repetir el caso 5 (persona detrás) para tener una corrida limpia**, con
+- [x] **Repetir el caso 5 (persona detrás) para tener una corrida limpia**, con
   las manos de JD fuera de cuadro desde PREPARA y durante todo el bloque.
   Comando:
   `fase_d_hard_cases.py --casos persona_detras_sin_gesto`. Hasta entonces, el
@@ -3176,3 +3176,47 @@ desde `993d0ea`. **Producción:** sin cambios en `2b74314`; solo se leyó.
 **Estado: sesión 2 de Fase D cerrada por decisión de JD**, con el caso 5
 pendiente. El PR de `fase-d-herramientas-fix` a `main` se abre solo con
 aprobación explícita de JD.
+
+## Fase D, sesión 2 — caso 5 repetido (2026-10-13, cierra el pendiente)
+
+**CUE:** `benchmarks/fase_d_cue_hard_cases_20261013_191943.log`, generado con
+el atajo nuevo `benchmarks/fase_d_caso5.py`, que corre solo el caso 5.
+Primer CUE a las 19:19:43,605, `FIN` a las 19:20:23,606. **Ventana:**
+19:19:42,605 → 19:20:33,606. Condiciones: 50cm, cliente a 7 fps
+(`fps_real` 6,99–7,00 en el bloque). Las manos de JD estuvieron escondidas
+desde antes de lanzar el guion, y la segunda persona cruzó con los brazos
+abajo en `PASA [1/2]` (19:19:58,605) y `PASA [2/2]` (19:20:11,605).
+
+Salida literal:
+```
+=== persona_detras_sin_gesto (objetivo=None) -- OK ===
+  gesto activo al empezar el bloque: ninguno
+  liberaciones dentro del bloque: 0
+  ningún gesto activo al empezar y ninguna línea enviada -- correcto
+```
+En toda la ventana no hubo ninguna línea `Gesto detectado` ni `Gesto liberado`.
+
+**Veredicto: OK.** El caso 5 tiene ahora una corrida limpia.
+
+**Cuadros crudos, para contexto (sin cambiar el veredicto):** de 210 cuadros
+`[diag]` dentro del bloque, 7 tuvieron algo distinto de "sin mano". Todos
+fueron aislados y ninguno llegó a confirmarse (hace falta 5 de 7):
+```
+19:19:58,056 puño_cerrado (0.93)    19:20:00,025 dedo_pulgar (0.74)
+19:20:14,748 puño_cerrado (0.96)    19:20:15,024 palma_abierta (0.98)
+19:20:16,864 palma_abierta (0.75)   19:20:21,765 / 19:20:21,863 sin gesto, dedos_extendidos=2
+```
+Los primeros aparecen alrededor de cada cruce (el primero, 0,55 s antes de
+`PASA [1/2]`). Muestran que el detector **sí ve cuadros sueltos con forma de
+mano mientras la persona pasa**, y que el `GestureStabilizer` los filtra. El
+log no dice de qué cuerpo eran. Con el margen actual (5 de 7 cuadros), el
+riesgo de manos ajenas queda **acotado pero no descartado** para Fases 9/10:
+una persona que se detenga en cuadro más de ~0,6 s con la mano visible sí
+podría confirmar un gesto. No se midió ese escenario.
+
+**Tests:** 112 pasan (+1: el atajo selecciona solo el caso 5).
+
+**Estado:** sesión 2 de Fase D cerrada sin pendientes de medición. Se mantienen
+las brechas abiertas del reporte de cierre. El PR de `fase-d-herramientas-fix`
+a `main` solo se abre con aprobación explícita de JD.
+
