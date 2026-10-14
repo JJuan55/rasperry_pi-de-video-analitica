@@ -2999,3 +2999,87 @@ ACEPTABLE; envío fuera de tolerancia = sin asignar).
 Ensayo en seco del guion con el tiempo acelerado (CUE escrito en el
 scratchpad, no en `benchmarks/`): genera las 16 señales CAMBIA, la señal METE
 y las 2 PASA, y el análisis las lee sin errores.
+
+## Fase D, sesión 2 — resultados de la repetición guiada (2026-10-13, 50cm)
+
+**CUE usado:** `benchmarks/fase_d_cue_hard_cases_20261013_190345.log`.
+Primer CUE a las 19:03:45,494, `FIN` a las 19:07:07,496. **Ventana:**
+19:03:44,494 → 19:07:17,496. JD corrió el guion **sin `--casos`**, así que
+entraron los 5 casos y no solo el 1, el 4 y el 5.
+**Descartado:** `fase_d_cue_hard_cases_20261013_190253.log` solo tiene la
+línea `PREPARA` del caso 1 (19:02:53,631). Es un arranque cortado y no se
+analiza.
+
+```
+analyze_hard_cases.py <log prod> benchmarks/fase_d_cue_hard_cases_20261013_190345.log --desde "2026-10-13 19:03:44,494" --hasta "2026-10-13 19:07:17,496"
+```
+
+| Caso | Veredicto (criterio fijado antes) | Líneas enviadas dentro del bloque |
+|---|---|---|
+| 1. movimiento_rapido (guiado) | **FALLA** (1 envío sin asignar) | 16 |
+| 2. mano_tapada_palma_abierta | OK | 0 (activo al empezar: `palma_abierta`) |
+| 3. mano_en_el_borde_puno_cerrado | OK | 0 (activo al empezar: `puño_cerrado`) |
+| 4. dos_manos_dedo_pulgar | **OK** | `19:05:59,792 dedo_pulgar (0.96)` |
+| 5. persona_detras_sin_gesto | **FALLA** | `19:06:42,961 palma_abierta (0.93)`, liberado a las 19:06:45,873 |
+
+### Caso 1: salida literal y lectura
+
+```
+resumen: 15/16 cambios con envío, 1 sin envío, 1 envío(s) sin asignar, 0 repetido(s)
+envío SIN ASIGNAR 19:03:56,801 palma_abierta
+```
+- **Envío sin asignar:** según los cuadros crudos, **no había mano en cuadro**
+  al ARRANCA (`dedos_extendidos=0` hasta las 19:03:55,926). La mano entra
+  **abierta** a las 19:03:56,127 y se confirma `palma_abierta` a las
+  19:03:56,801, antes de llegar al `puño_cerrado` pedido (que se envía a las
+  19:03:57,622). Es la postura de entrada de la mano, no un gesto intermedio
+  entre dos gestos pedidos. **Por el criterio fijado sigue siendo FALLA**, y
+  también lo sería para un actuador real: esa línea sí salió.
+- **Las 15 transiciones siguientes salieron limpias:** ningún gesto
+  intermedio, ningún envío repetido, un envío por cambio. El tiempo desde la
+  señal CAMBIA hasta el envío (incluye la reacción de JD) fue de 1548 a
+  2160 ms. El cambio 1 tardó 2127 ms porque la mano entró en ese momento.
+- **Cambio 16 "SIN envío":** sí se envió, pero **después del bloque**:
+  `19:04:28,111 Gesto detectado: dedo_menique (confianza=1.00)`, 2616 ms
+  después de su señal y 0,6 s después de `TERMINA` (19:04:27,495). El guion
+  solo deja 2 s después de la última señal, menos que la latencia observada.
+  **Es un límite del guion, no del sistema.** Si se repite, hay que dejar al
+  menos ~3 s de cola.
+
+### Caso 4: OK con el planteamiento corregido
+
+Con la mano del pulgar dentro primero, se envió **solo** `dedo_pulgar`
+(19:05:59,792). Después de la señal `METE` (19:06:05,496) no hubo ningún envío
+ni liberación hasta `TERMINA`. Esto concuerda con el diseño `num_hands=1` +
+modo VIDEO que describió JD. Qué mano procesó MediaPipe en cada cuadro sigue
+sin ser verificable desde el log.
+
+### Caso 5: FALLA, con correlación temporal con el primer cruce
+
+Cuadros crudos: mano con 5 dedos desde las **19:06:42,406**, **90 ms antes**
+de la señal `PASA [1/2]` (19:06:42,496). Se confirmó `palma_abierta` a las
+19:06:42,961 y se liberó a las 19:06:45,873. En el segundo cruce
+(`PASA [2/2]`, 19:06:55,496) solo hubo 2 cuadros aislados con gesto
+(19:06:56,437 `palma_abierta`; 19:07:05,722 `dedo_pulgar`), sin
+confirmación y sin envío. La coincidencia con el primer cruce es fuerte. **El
+log no permite saber de quién era la mano.** Ocurre en las dos corridas, así
+que no parece un accidente aislado.
+
+**Dato para Fases 9/10 (no es un cambio en esta fase):** el detector no
+distingue la mano del operador de la de alguien más en el fondo. Una palma
+visible de cualquier persona durante ~0,6 s (5 de 7 cuadros) basta para
+enviar una línea. Si eso debe impedirse, hace falta un criterio nuevo
+(tamaño o posición de la mano, zona de interés, o que el gesto se sostenga
+más tiempo) para decidir aparte. No se implementa nada aquí.
+
+### Casos 2 y 3: corrida extra, más débil que la primera
+
+Los dos dan OK, pero el gesto objetivo **ya estaba activo al empezar** (se
+confirmó durante PREPARA) y no hubo envíos dentro del bloque. Solo muestran que
+no se envió ningún gesto equivocado mientras se sostenía el objetivo tapado o
+en el borde. No vuelven a probar la confirmación en esas condiciones. La
+corrida de las 18:47 sigue siendo la evidencia principal para estos dos casos.
+
+### Pendiente de JD
+- Sensibilidad del cliente.
+- Caso 5, ambas corridas: ¿de quién era la mano que apareció?
