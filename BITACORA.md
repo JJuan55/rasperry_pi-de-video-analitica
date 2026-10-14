@@ -3083,3 +3083,28 @@ corrida de las 18:47 sigue siendo la evidencia principal para estos dos casos.
 ### Pendiente de JD
 - Sensibilidad del cliente.
 - Caso 5, ambas corridas: ¿de quién era la mano que apareció?
+
+### Datos de JD recibidos después del análisis
+
+- **Sensibilidad del cliente: 7 fps**, la misma en todas las corridas de la
+  sesión 2. Concuerda con el `fps_real` del log en las tres ventanas: 6,94–7,00
+  (liberación, 1203 líneas `Frame`), 6,96–6,99 (casos difíciles, 1481) y
+  6,98–6,99 (repetición guiada, 1496). Por tanto, el periodo entre cuadros de
+  toda la sesión fue de ≈143 ms, y el piso de liberación por construcción es
+  ≈16 × 143 ms ≈ 2,3 s (ver la corrección de la sección B).
+- **Caso 5**, palabras de JD: *"si se captó una mano al inicio fue mía por no
+  quitarla a tiempo"*.
+  **Contraste con el log (sin cambiar el veredicto):**
+  - En la corrida de las 18:47 sí hubo una mano de JD **al inicio**, pero
+    durante PREPARA: `palma_abierta` detectada a las 18:50:22,566 y liberada a
+    las 18:50:26,460, **antes** del ARRANCA (18:50:28,618). Como ya estaba
+    liberada al empezar, no entra en el veredicto ("activo al empezar:
+    ninguno").
+  - Los envíos que hacen FALLA **no son del inicio del bloque**:
+    `dedo_pulgar` a las 18:50:44,288 (15,7 s después del ARRANCA) y
+    `palma_abierta` a las 19:06:42,961 (5,5 s después del ARRANCA, 90 ms antes
+    de la señal `PASA [1/2]`).
+  - **Atribución de esos dos envíos: pendiente de que JD confirme si se refiere
+    a ellos.** Mientras tanto no se atribuyen ni a JD ni a la segunda persona.
+    El veredicto FALLA se mantiene igual: el criterio fijado es "cualquier
+    línea enviada", sea de quien sea la mano.
