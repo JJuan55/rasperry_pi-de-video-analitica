@@ -467,3 +467,10 @@ def test_guided_changes_send_beyond_tolerance_is_unassigned():
     ok, summary = ahc.evaluate_guided_changes(changes, [(_ts(late), "puño_cerrado", 1.0)])
     assert ok is False
     assert summary["sin_asignar"] == [(_ts(late), "puño_cerrado")]
+
+
+def test_caso5_shortcut_selects_only_persona_detras():
+    import fase_d_caso5
+    casos = fase_d_caso5.ARGS[fase_d_caso5.ARGS.index("--casos") + 1]
+    sel = fhc.select_cases(casos)
+    assert [c[0] for c in sel] == ["persona_detras_sin_gesto"]

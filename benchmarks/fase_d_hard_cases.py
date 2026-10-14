@@ -137,10 +137,10 @@ def select_cases(casos_arg):
     return [c for c in CASES if c[0] in wanted]
 
 
-def main() -> None:
+def main(argv=None) -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--casos", default=None, help=f"Nombres cortos separados por comas. Válidos: {','.join(CASE_NAMES)}")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     try:
         cases = select_cases(args.casos)
     except ValueError as e:
