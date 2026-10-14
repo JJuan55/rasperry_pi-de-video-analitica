@@ -3108,3 +3108,63 @@ corrida de las 18:47 sigue siendo la evidencia principal para estos dos casos.
     a ellos.** Mientras tanto no se atribuyen ni a JD ni a la segunda persona.
     El veredicto FALLA se mantiene igual: el criterio fijado es "cualquier
     línea enviada", sea de quien sea la mano.
+- **Atribución del caso 5, confirmada por JD:** *"tuvo que ser mía, nunca
+  detectó la mano de la persona de atrás en el cliente"*. Se registra como
+  **relato de JD**: el log no lo confirma ni lo descarta. **Salvedad:** según
+  CLAUDE.md §5, el esqueleto de mano que muestra el cliente es un overlay
+  cosmético 100% client-side, independiente del detector del bridge. Que el
+  cliente no dibujara la mano de la otra persona **no prueba** que el bridge
+  no la haya visto. Con el relato de JD, la lectura más probable de las dos
+  FALLA del caso 5 es un **error de ejecución** (la mano de JD entró en
+  cuadro), no detección de una persona del fondo. Por eso el "dato para
+  Fases 9/10" sobre manos ajenas queda como **hipótesis no demostrada**, no
+  como hallazgo. El veredicto FALLA no cambia (el criterio fijado es
+  "cualquier línea enviada").
+
+## Fase D, sesión 2 — reporte de cierre (2026-10-13)
+
+**Rama:** `fase-d-herramientas-fix` (worktree `cva-pi-repo-fase-d-fix`),
+desde `993d0ea`. **Producción:** sin cambios en `2b74314`; solo se leyó.
+**Tests:** 111 pasan.
+
+### Qué se hizo
+1. Correcciones de herramientas antes de analizar: liberación como función
+   pura con su test, emparejamiento QUITA ↔ liberación por tiempo, estado
+   activo al empezar y liberaciones por bloque en los casos difíciles, y
+   corrección de la afirmación sobre 2288 ms.
+2. Medición real a 50 cm y 7 fps contra el servicio de producción: batería de
+   liberación (20 repeticiones) y casos difíciles.
+3. Repetición guiada (`--casos`, señales CAMBIA, METE y PASA), con los
+   criterios fijados antes de medir.
+
+### Resultados principales
+| Medición | Resultado |
+|---|---|
+| Liberación desde QUITA (n=17/20) | avg 3715 ms, p50 3669, p95 4558, máx 4975, mín 3077. **Sesgada hacia abajo:** 3 de 20 liberaron después del siguiente HAZ (≈5,3–5,9 s), así que el máximo real es ≈5,9 s |
+| Tiempo de sistema de confirmación | máx 660 ms, 0/21 por encima de AC3 (1500 ms) |
+| Gestos equivocados en la batería | 2 de 20 repeticiones (las dos de `puño_cerrado`, ~1 s) |
+| Caso 1, movimiento rápido guiado | FALLA por 1 envío (la mano entró abierta); 15/16 cambios limpios |
+| Caso 2, mano tapada | OK |
+| Caso 3, mano en el borde | OK |
+| Caso 4, dos manos (en orden) | OK en la repetición; FALLA en la primera corrida, que estaba mal planteada |
+| Caso 5, persona detrás | FALLA en las dos corridas; según JD fue su propia mano |
+
+### Datos de diseño para Fases 9/10 (no se cambia nada en esta fase)
+- La liberación depende de los fps: 16 cuadros sin mano equivalen a ~2 s a
+  8 fps y a ~4 s a 4 fps. Si un actuador debe detenerse en un tiempo
+  garantizado, hay que expresar ese tiempo en segundos.
+- La liberación real, incluyendo la reacción humana, llega a ≈5,9 s a 7 fps.
+- Con `num_hands=1` en modo VIDEO, el detector sigue a la primera mano que ve.
+  Una segunda mano no le quita el seguimiento (caso 4).
+
+### Brechas abiertas
+- Sin segunda persona de otro tono de piel.
+- Solo 50 cm.
+- Solo hasta el envío desde la Pi: no incluye el túnel ni la pantalla.
+- El caso 5 no tiene una corrida limpia; la atribución depende del relato de JD.
+- No se investigaron los 2 gestos equivocados de la batería ni el máximo de
+  4343 ms de la liberación del sistema.
+- El emparejamiento HAZ ↔ detección sigue siendo por orden.
+
+**Estado: esperando revisión y aprobación de JD** antes del PR a `main` y de
+cualquier paso siguiente.
