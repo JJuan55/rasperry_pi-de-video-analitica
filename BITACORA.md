@@ -3166,5 +3166,13 @@ desde `993d0ea`. **Producción:** sin cambios en `2b74314`; solo se leyó.
   4343 ms de la liberación del sistema.
 - El emparejamiento HAZ ↔ detección sigue siendo por orden.
 
-**Estado: esperando revisión y aprobación de JD** antes del PR a `main` y de
-cualquier paso siguiente.
+### Pendiente (decisión de JD, 2026-10-13: cerrar la sesión aquí)
+- [ ] **Repetir el caso 5 (persona detrás) para tener una corrida limpia**, con
+  las manos de JD fuera de cuadro desde PREPARA y durante todo el bloque.
+  Comando:
+  `fase_d_hard_cases.py --casos persona_detras_sin_gesto`. Hasta entonces, el
+  caso 5 sigue en FALLA y la hipótesis de manos ajenas sigue sin demostrar.
+
+**Estado: sesión 2 de Fase D cerrada por decisión de JD**, con el caso 5
+pendiente. El PR de `fase-d-herramientas-fix` a `main` se abre solo con
+aprobación explícita de JD.
