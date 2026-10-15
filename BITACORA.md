@@ -2507,6 +2507,8 @@ cronológico correcto. Nunca escribe ni borra nada — abre todo en modo lectura
 
 Ya existía (desde Fase D sesión 1) el cálculo desde la señal **QUITA** real
 del guion, cuando hay CUE guardado — confirmado que sigue funcionando igual.
+*(Corregido después: ese cálculo emparejaba por orden y ahora empareja por
+tiempo. Ver "Fase D, sesión 2 — correcciones de herramientas".)*
 
 **Agregado**: el **tiempo de liberación DEL SISTEMA**, derivado del log crudo
 solo (sin necesitar CUE) — se reproduce el `GestureStabilizer` real con
@@ -2517,8 +2519,43 @@ desde el último frame que de verdad coincidió con el gesto confirmado hasta la
 línea `Gesto liberado` — es la parte de liberación que depende solo del
 sistema, sin la reacción humana de sacar la mano. Verificado contra el log
 real de la sesión 1 (50cm): avg=2349ms, p50=2339ms, max=2476ms, min=2262ms —
-consistente con el piso teórico de `GESTURE_RELEASE_AFTER_MISSES_NO_HAND=16` ×
-~143ms ≈ 2288ms (Fase C2), no un número sin relación con el código real.
+~~consistente con el piso teórico de `GESTURE_RELEASE_AFTER_MISSES_NO_HAND=16` ×
+~143ms ≈ 2288ms (Fase C2), no un número sin relación con el código real.~~
+
+> **Corrección (revisión de Fase D sesión 2, rama `fase-d-herramientas-fix`):**
+> la frase tachada presentaba como validación algo que no lo es. Que el
+> resultado "concuerde con 2288ms" es **por construcción**: el cálculo
+> reproduce el mismo `GestureStabilizer`, y con la mano fuera de cuadro
+> (`hand_present=False`) suelta exactamente al cuadro 16 sin gesto
+> (`GESTURE_RELEASE_AFTER_MISSES_NO_HAND=16`). Lo que mide es, por tanto,
+> **16 × el periodo real entre cuadros**. No es una validación independiente
+> del contador; lo único que aporta el dato real es el periodo entre cuadros
+> (fps del cliente). Ahora hay un test que lo afirma de forma explícita
+> (`test_system_release_equals_required_misses_times_frame_period`: 16 × 125ms y
+> 16 × 167ms, los extremos de 8 y 6 fps, y que cambia si cambia el periodo). Al recalcularlo con la
+> herramienta refactorizada sobre el archivo archivado de la sesión 1
+> (`benchmarks/fase_d_run_sin_condicion.log`) da avg=2348ms, p50=2338ms,
+> max=2476ms, min=2262ms. La salida es idéntica byte a byte a la versión anterior
+> de la herramienta sobre ese mismo archivo. La diferencia de 1ms con los
+> números de arriba **no está explicada**: no quedó registrado contra qué
+> archivo o ventana exacta se calcularon. Queda anotada, sin atribuirle una causa.
+>
+> **Dato para Fases 9/10** *(corregido el 2026-10-14: la versión anterior usaba
+> un rango de fps que el cliente no permite)*: la liberación **depende de
+> los fps**. El cliente permite configurar **de 6 a 8 fps**
+> (`CVA_ConfigSidebar.tsx`, líneas 141-143, según JD; ese archivo es del repo
+> del cliente y no está en esta Pi ni en `reference/`). Por tanto, 16 cuadros
+> son **2,0 a 2,7 s** (16 × 125ms = 2000ms a 8 fps; 16 × 167ms ≈ 2667ms a 6 fps).
+> Con mano presente pero ambigua el umbral es 20 cuadros
+> (`GESTURE_RELEASE_AFTER_MISSES=20`): 2,5 a 3,3 s. **Estos rangos suponen
+> cuadros llegando al ritmo nominal.** Un hueco sin cuadros se suma entero
+> (ver "detalle de la batería": rep 3, 16 cuadros + 2463 ms de hueco = 4343 ms).
+> Si en Fase 9/10 un
+> actuador debe detenerse en un tiempo máximo garantizado, ese tiempo tiene
+> que expresarse en segundos y no en cuadros, o el contador tiene que
+> convertirse a tiempo. Con el diseño actual, un fps más bajo o un hueco en la
+> llegada de cuadros alarga la liberación. No se cambia nada del servicio
+> aquí: queda como dato de diseño para esas fases.
 
 ### C. Batería corta de liberación (20 repeticiones)
 
@@ -2628,3 +2665,748 @@ $ git log -1 --oneline
 Producción sin cambios, confirmado de nuevo (solo lectura) al cerrar este Paso 1.
 Rama, hash del push y conteo de tests: reportados en el mensaje de cierre de
 esta sesión (ver también `git log` de `fase-d-mediciones-2`).
+
+## Fase D, sesión 2 — correcciones de herramientas (2026-10-13, rama `fase-d-herramientas-fix`)
+
+Rama nueva desde `origin/main` en `993d0ea` (PR #4 ya fusionado), en el
+worktree `~/video_analitica/cva-pi-repo-fase-d-fix`. Solo cambian
+`benchmarks/analyze_fase_d_run.py`, `benchmarks/analyze_hard_cases.py`,
+`tests/test_fase_d_tools.py` y esta bitácora. No se toca nada del paquete
+`cva_gesture_bridge` ni de producción. Los CUE y el log de producción no se
+modifican.
+
+**Estado de los datos al hacer estas correcciones:** al momento de este paso
+**no existe ningún archivo `fase_d_cue_*`** en la Pi (búsqueda en todo
+`/home/david_cardenas`), así que la corrida de liberación y de casos difíciles
+todavía no ha generado CUE. El análisis (Paso 2) queda pendiente hasta que
+existan.
+
+### Tasklist
+
+- [x] a) Extraer de `main()` el cálculo de liberación a funciones puras y testearlo
+  con una secuencia sintética.
+- [x] b) Emparejar QUITA ↔ liberación por tiempo, reportar las QUITA sin
+  liberación y testearlo con una repetición sin liberación.
+- [x] c) Casos difíciles: agregar "gesto activo al empezar" y "liberación dentro del
+  bloque". En el caso 5, un gesto activo que cruza el inicio es NO aceptable.
+  Con test.
+- [x] d) Corregir la afirmación "concuerda con 2288ms" (arriba, sección B de la
+  preparación) y documentar la dependencia de los fps para Fases 9/10.
+- [ ] Paso 2: analizar la sesión real. **Bloqueado: no hay CUE todavía.**
+
+### a) Liberación del sistema como función pura
+
+El bloque que reproducía el `GestureStabilizer` dentro de `main()` pasó a
+cuatro funciones puras: `raw_observations_from_events()`, `replay_stabilizer()`,
+`system_release_times_ms()` y `summarize_ms()` (avg/p50/p95/max/min/n por
+rango más cercano, el mismo criterio que ya usaba el resto de Fase D). `main()`
+ahora solo las llama.
+
+**Verificación de no-regresión:** sin `--cue`, la salida sobre el log
+archivado de la sesión 1 es idéntica (`diff` vacío) entre la versión anterior
+(`993d0ea`) y la refactorizada.
+
+Tests nuevos: `test_system_release_equals_required_misses_times_frame_period`
+(liberación = `_release_after_misses_no_hand` × periodo, a 125ms y a 167ms: 8 y 6 fps),
+`test_system_release_changes_when_frame_period_changes` y
+`test_raw_observations_from_events_keeps_order_and_none`.
+
+### b) QUITA ↔ liberación por tiempo
+
+**Defecto real de la versión anterior:** emparejaba por orden (n-ésima
+liberación con la n-ésima QUITA) y, si los conteos no coincidían, no calculaba
+nada. Bastaba una liberación espuria durante un sostenido, o una repetición sin
+liberación, para perder la batería entera. Y si por casualidad los conteos sí
+coincidían, podía emparejar mal (una liberación anterior a su QUITA da un
+tiempo negativo).
+
+**Ahora:** `match_quita_to_releases()` asigna a cada QUITA la **primera**
+liberación posterior a ella y anterior al siguiente HAZ. La última QUITA no
+tiene límite superior, más allá de la ventana `--hasta`. Se imprime una línea
+por QUITA con su liberación o con "SIN liberación en el intervalo", y el
+conteo `QUITA sin liberación en su intervalo: k/n`. Las estadísticas
+(avg/p50/p95/max/min/n) se calculan solo sobre las QUITA emparejadas.
+
+Tests: `test_match_quita_to_releases_by_time_with_one_rep_without_release` (una
+liberación espuria durante el sostenido, una repetición sin liberación y una
+liberación posterior al siguiente HAZ que no debe asignarse a la repetición
+anterior), `test_match_quita_last_rep_has_no_upper_bound` y
+`test_summarize_ms_nearest_rank_percentiles`.
+
+**Sin cambio, anotado:** el emparejamiento HAZ ↔ detección (tiempo total desde
+HAZ, que incluye la reacción humana) **sigue siendo por orden** y solo se
+calcula si los conteos coinciden. No estaba en el alcance de esta corrección y
+no entra en la tabla de resultados pedida. Si se quiere usar ese número, debe
+pasar por la misma corrección antes.
+
+### c) Casos difíciles: estado al empezar y liberación dentro del bloque
+
+- `active_gesture_at(events, ts)` devuelve el gesto vigente para el cliente en
+  el instante ARRANCA: la última línea `Gesto detectado` estrictamente anterior,
+  salvo que después haya un `Gesto liberado`. Se apoya en lo que hace
+  `main.py`, verificado en el código: un cambio A→B manda `Gesto detectado: B`
+  sin liberar en medio, y `Gesto liberado` solo se manda al soltar. Se calcula
+  sobre el log **completo**, no solo sobre `--desde/--hasta`, para no perder un
+  gesto confirmado antes de la ventana.
+- `releases_in_window()` devuelve las liberaciones dentro de cada bloque.
+- El reporte por caso ahora imprime: el gesto activo al empezar, cada línea
+  enviada con su hora y confianza, cada liberación y el conteo de
+  liberaciones.
+- **Caso 5:** un gesto activo al empezar el bloque es **NO aceptable** (para
+  el cliente, la instrucción sigue vigente durante el bloque aunque no se
+  reenvíe). En los casos 1–4 el estado al empezar **se reporta pero no cambia
+  el veredicto**: no estaba en los criterios definidos antes de medir.
+- `analyze_hard_cases.py` acepta ahora también `--desde/--hasta`, igual que
+  `analyze_fase_d_run.py`.
+
+Tests: `test_active_gesture_at_tracks_last_detected_or_released`,
+`test_releases_in_window_filters_by_timestamp`,
+`test_persona_detras_active_gesture_crossing_start_is_not_acceptable` y
+`test_active_gesture_at_start_does_not_change_verdict_of_other_cases`.
+
+### d) Corrección de la afirmación sobre 2288ms
+
+Hecha en el lugar, en "Fase D, sesión 2 — preparación", sección B: la frase
+original queda tachada y debajo va la corrección, junto con el dato de
+dependencia de los fps para Fases 9/10.
+
+### Resultado de tests
+
+```
+$ ../cva-pi-repo-fase-c2-fix/.venv-fase-c2-fix/bin/python -m pytest -q
+........................................................................ [ 69%]
+................................                                         [100%]
+104 passed in 8.93s
+```
+
+Antes de esta rama eran 94 tests. Se agregaron 10 y no se quitó ninguno. El
+venv es el del worktree `cva-pi-repo-fase-c2-fix`, el mismo intérprete y las
+mismas dependencias. `models/` y `tests/fixtures_real/` se copiaron a este
+worktree; ambos están en `.gitignore` y no se versionan.
+
+
+## Fase D, sesión 2 — resultados (2026-10-13, condición 50cm, contra el servicio real)
+
+Medido directo contra el servicio de producción (`main` = `2b74314`, puerto
+8766), con el cliente real conectado por el túnel SSH. Ni el servicio ni la
+configuración se tocaron. Los análisis usan las herramientas ya corregidas
+(rama `fase-d-herramientas-fix`, commit `4ac079e`). Sobre el log de producción
+solo hubo lectura; los CUE no se modificaron (están en `.gitignore` y no se
+versionan).
+
+**Datos de la sesión que debe dar JD (pendientes al escribir esto):**
+- Sensibilidad del cliente: **no indicada todavía**. No existe ese ajuste en
+  ningún archivo de este repo ni en `reference/`, así que no se puede deducir
+  desde la Pi.
+- Caso 1: el dato recibido es "8 cambios en orden, 2 rondas". **Falta confirmar
+  si son 8 cambios en total o 8 por ronda (16)**, y qué orden se usó. De eso
+  depende el juicio humano del caso 1 (ver abajo).
+
+### CUE y ventanas usadas (primer CUE − 1 s → último CUE + 10 s)
+
+| Corrida | CUE | Primer CUE | Último CUE (`FIN`) | Ventana analizada |
+|---|---|---|---|---|
+| Liberación (20 reps) | `benchmarks/fase_d_cue_50cm_liberacion_20261013_184008.log` | 18:40:18,433 | 18:42:58,446 | 18:40:17,433 → 18:43:08,446 |
+| Casos difíciles | `benchmarks/fase_d_cue_hard_cases_20261013_184738.log` | 18:47:38,615 | 18:50:58,618 | 18:47:37,615 → 18:51:08,618 |
+
+**Corrida de casos difíciles descartada:** existe además
+`fase_d_cue_hard_cases_20261013_184639.log`, que llega solo hasta
+`ARRANCA caso 'mano_tapada_palma_abierta'` (18:47:29) y no tiene `TERMINA` ni
+`FIN`. Se cortó a mitad del caso 2 y JD la relanzó a las 18:47:38. **No se
+analiza.** La ventana usada empieza después de su corte.
+
+Comandos (desde `~/video_analitica/cva-pi-repo-fase-d-fix`, con el venv de
+`cva-pi-repo-fase-c2-fix`):
+```
+analyze_fase_d_run.py  <log prod> --cue benchmarks/fase_d_cue_50cm_liberacion_20261013_184008.log --desde "2026-10-13 18:40:17,433" --hasta "2026-10-13 18:43:08,446"
+analyze_hard_cases.py  <log prod> benchmarks/fase_d_cue_hard_cases_20261013_184738.log --desde "2026-10-13 18:47:37,615" --hasta "2026-10-13 18:51:08,618"
+```
+
+### Corrida 1 — liberación desde QUITA (salida literal)
+
+```
+QUITA sin liberación en su intervalo: 3/20 (reps [3, 7, 15])
+Tiempo de liberación desde la señal QUITA real -- n=17 avg=3715ms p50=3669ms p95=4558ms max=4975ms min=3077ms
+```
+
+| Métrica | Valor |
+|---|---|
+| n (QUITA emparejadas) | 17 de 20 |
+| promedio | 3715 ms |
+| p50 | 3669 ms |
+| p95 | 4558 ms |
+| máx | 4975 ms |
+| mín | 3077 ms |
+
+**Advertencia de sesgo:** la tabla está **sesgada hacia abajo**. Las 3 QUITA
+"sin liberación" (reps 3, 7 y 15) sí tuvieron liberación, pero llegó
+**después** del siguiente HAZ, así que por regla quedan fuera del
+emparejamiento. Estas son las líneas literales del log de producción:
+```
+CUE  18:40:37,434 [3/20] QUITA   -> log 18:40:43,007 Gesto liberado (antes: puño_cerrado)    -- HAZ [4] a las 18:40:42,435
+CUE  18:41:09,438 [7/20] QUITA   -> log 18:41:15,332 Gesto liberado (antes: palma_abierta)   -- HAZ [8] a las 18:41:14,438
+CUE  18:42:13,442 [15/20] QUITA  -> log 18:42:18,780 Gesto liberado (antes: dedo_pulgar)     -- HAZ [16] a las 18:42:18,444
+```
+De esas líneas sale una diferencia QUITA→liberado de ≈5,6 s, ≈5,9 s y ≈5,3 s:
+las tres más lentas de la batería, todas por encima del intervalo de 5 s del
+guion. **No entran en la tabla** porque la herramienta no las empareja.
+Conclusión que sí se sostiene: en 3 de 20 repeticiones (15%) la liberación
+tardó más que los 5 s que el guion deja con la mano fuera, y el máximo real de
+la batería es **≈5,9 s, no 4975 ms**.
+
+Otros datos de la misma salida, para contexto (no son lo pedido en la tabla):
+```
+Tiempo de sistema -- avg=519ms p50=525ms p95=599ms max=660ms min=222ms
+Repeticiones que superan AC3 (<1500ms): 0/21
+Tiempo de liberación DEL SISTEMA (...) -- n=21 avg=2424ms p50=2311ms max=4343ms min=2195ms
+```
+~~El fps real en la ventana fue de 6,94 a 7,00 (1203 líneas `Frame`), así que
+el piso de liberación por construcción es ≈16 × 143 ms ≈ 2,3 s, como se
+corrigió arriba. El máximo de 4343 ms de la liberación del sistema no es la
+regla de 16 cuadros: cuadra con el umbral de 20 cuadros (mano presente pero
+ambigua) más algún cuadro con forma ambigua que reinicia o retrasa la cuenta.
+**No se investigó cuál repetición fue; queda abierto.**~~
+
+> **Corrección (2026-10-14), las dos afirmaciones tachadas eran incorrectas:**
+> (1) `fps_real` es el promedio **acumulado desde que se abrió la conexión**
+> (`tcp_server.py:39-42`), no el fps del momento. Por eso marca ~7 todo el rato y
+> no muestra huecos ni ráfagas. (2) El máximo de 4343 ms **no** fue el umbral de
+> 20 cuadros: fue la rep 3, con 16 cuadros (14 sin mano, 2 con mano) más un
+> **hueco de 2463 ms sin cuadros**. Detalle en "Fase D, sesión 2 — detalle de la
+> batería".
+
+**Gestos equivocados confirmados durante la batería** (visibles en la salida
+literal, marcados CONTAMINADA):
+```
+[   28] 18:40:21,233 puño_cerrado   conf=1.00   (HAZ [1] puño_cerrado)
+[   37] 18:40:22,341 dedo_menique   conf=0.99 CONTAMINADA
+[  200] 18:40:45,614 dedo_pulgar    conf=1.00   (HAZ [4] puño_cerrado)
+[  213] 18:40:46,608 puño_cerrado   conf=1.00 CONTAMINADA
+```
+En 2 de 20 repeticiones (las dos de `puño_cerrado`) se envió un gesto
+distinto al pedido, durante ~1 s. En la rep 1, `dedo_menique` llegó después del
+puño correcto. En la rep 4, `dedo_pulgar` llegó antes que el puño correcto.
+Queda como dato real de precisión, sin explicación todavía.
+
+### Corrida 2 — casos difíciles
+
+| Caso | Objetivo | Activo al empezar | Líneas enviadas en el bloque | Liberaciones | Veredicto |
+|---|---|---|---|---|---|
+| 1. movimiento_rapido | (cualquiera) | ninguno | 16 (ver abajo) | 1 | **No verificable** automáticamente; juicio humano pendiente del dato de JD |
+| 2. mano_tapada_palma_abierta | palma_abierta | ninguno | `18:48:32,162 palma_abierta (0.98)` | 0 | **OK** |
+| 3. mano_en_el_borde_puno_cerrado | puño_cerrado | ninguno | `18:49:12,699 puño_cerrado (1.00)` | 0 | **OK** |
+| 4. dos_manos_dedo_pulgar | dedo_pulgar | ninguno | `18:49:50,627 palma_abierta (0.99)`, `18:49:53,766 dedo_pulgar (0.99)` | 0 | **FALLA** |
+| 5. persona_detras_sin_gesto | (nada) | ninguno | `18:50:44,288 dedo_pulgar (0.76)` | 1 (`18:50:53,027`) | **FALLA** |
+
+**Caso 1**: las 16 líneas enviadas, en orden (salida literal):
+`puño_cerrado, palma_abierta, dedo_menique, dedo_pulgar, puño_cerrado,
+palma_abierta, dedo_pulgar, puño_cerrado, dedo_pulgar, palma_abierta,
+dedo_menique, palma_abierta, dedo_pulgar, dedo_menique, puño_cerrado,
+palma_abierta`, más 1 liberación (`18:48:03,386`, antes: `dedo_pulgar`).
+Ninguna línea quedó fuera de la ventana del bloque. Si fueron 16 cambios
+reales (8 por ronda × 2), el conteo coincide 1:1. Si fueron 8 en total, el
+sistema envió el doble. **Además, la secuencia enviada no sigue un ciclo fijo
+de los 4 gestos**: hay pares invertidos (`dedo_menique` antes de `dedo_pulgar`)
+y gestos que faltan dentro de un ciclo. Esto puede ser una confirmación de
+gestos intermedios o simplemente el orden real de JD. Solo se puede juzgar
+con su confirmación del protocolo usado.
+
+**Caso 4**: primero se confirmó y envió `palma_abierta` (la otra mano, abierta),
+y 3,1 s después `dedo_pulgar`. Según el criterio fijado antes de medir,
+enviar un gesto distinto al objetivo es NO aceptable. Qué mano eligió el
+detector **no es verificable** (`num_hands=1`).
+
+**Caso 5**: la línea **sí salió por el socket**: confianza 0.76 ≥
+`MIN_CONFIDENCE` = 0.5 (`config.py:41`, sin override en el EnvironmentFile
+del servicio), así que la salvedad del proxy no aplica aquí. En los cuadros
+crudos anteriores (18:50:42,7 → 18:50:44,3) hay una mano real: 4 cuadros de
+`palma_abierta` con 5 dedos, luego `dedo_pulgar` con 1 dedo, hasta confirmar.
+Después siguen cuadros de `puño_cerrado`, y se libera a las 18:50:53,027. **El
+log no permite saber si esa mano era de la persona que pasaba o la de JD.**
+Hace falta el relato de JD. Por el criterio fijado (cualquier gesto enviado =
+NO aceptable), el veredicto es FALLA de todos modos. El estado activo al
+empezar fue "ninguno": el `palma_abierta` de JD al salir del caso 4 se liberó a
+las 18:50:26,460, antes del ARRANCA (18:50:28,618).
+
+### Brechas abiertas
+
+- **Sin segunda persona de otro tono de piel**: sigue abierta. La persona del
+  caso 5 pasó por detrás; no hizo los gestos del catálogo.
+- **Solo 50 cm**: las distancias media y lejana siguen aplazadas por decisión
+  de JD.
+- **Solo hasta el envío desde la Pi**: no incluye la red del túnel SSH ni el
+  pintado en el cliente.
+- Las 3 liberaciones más lentas quedan fuera de la tabla por la regla de
+  emparejamiento (ver arriba). Si se quiere tenerlas en la tabla, la próxima
+  batería necesita más de 5 s fuera de cuadro.
+- El máximo de 4343 ms de la liberación del sistema y los 2 gestos
+  equivocados de la batería no se investigaron.
+- Sensibilidad del cliente y protocolo exacto del caso 1: pendientes de JD.
+
+## Fase D, sesión 2 — repetición guiada de los casos 1, 4 y 5 (preparación, sin medir todavía)
+
+Pedido de JD después de los resultados. Repite solo los tres casos que no
+pasaron (1 no verificable, 4 y 5 FALLA), con instrucciones más claras. JD aportó
+este contexto de la primera corrida:
+
+- **Caso 1:** JD se descoordinó al cambiar de gesto. Dejó la mano en cuadro y
+  solo cambió de gesto. Sin una señal por cada cambio, el criterio no se podía
+  verificar.
+- **Caso 4:** la configuración toma una sola mano de referencia, y la segunda
+  no cuenta hasta que la principal sale de cuadro. **Verificado en el código:**
+  `detector.py:367-371`, `RunningMode.VIDEO` + `num_hands=1` +
+  `min_tracking_confidence`. MediaPipe sigue a la mano ya detectada en vez de
+  volver a detectar en cada cuadro. En la corrida 1, `palma_abierta` se
+  confirmó **antes** que `dedo_pulgar`, lo que cuadra con que la mano abierta
+  fue la primera en ser detectada. Esto **no cambia** el veredicto FALLA de esa
+  corrida (fue con el criterio fijado entonces), pero sí muestra que el caso
+  estaba mal planteado: no fijaba qué mano entraba primero.
+
+### Cambios en las herramientas
+
+`benchmarks/fase_d_hard_cases.py`:
+- `--casos a,b,c`: corre solo los casos indicados, en el orden fijo de
+  `CASES`. Un nombre desconocido da error explícito.
+- Señales dentro del bloque (`build_case_steps()`, función pura):
+  - **Caso 1:** `CAMBIA [i/16] a: <gesto>` cada 2 s. Son 2 rondas de 8 cambios
+    en orden fijo (puño, palma, pulgar, meñique, dos veces por ronda), en un
+    bloque de 32 s. La mano se queda en cuadro todo el bloque.
+  - **Caso 4:** al ARRANCA entra **solo** la mano del pulgar. A los 8 s llega
+    la señal `METE la segunda mano ABIERTA`, que entra sin tapar la primera.
+    La mano del pulgar no sale en ningún momento.
+  - **Caso 5:** señales `PASA [1/2]` y `PASA [2/2]` a los 5 s y a los 18 s. Las
+    manos de JD quedan fuera de cuadro desde PREPARA, y la segunda persona
+    cruza con los brazos abajo.
+
+`benchmarks/analyze_hard_cases.py`:
+- `parse_inner_cues()` lee las señales CAMBIA, METE y PASA.
+- `evaluate_guided_changes()` (función pura) evalúa el caso 1.
+
+### Criterios, definidos ANTES de medir
+
+- **Caso 1 (guiado):** cada envío se asigna a la señal CAMBIA más reciente
+  **del mismo gesto**, anterior al envío y a no más de 4 s (2 × el intervalo).
+  - **OK** = ningún envío sin asignar (gesto no pedido, como un gesto
+    intermedio al pasar de una forma a otra, o un envío fuera de tolerancia) y
+    ningún cambio con más de un envío.
+  - Los cambios sin envío **se reportan y se cuentan, pero no hacen FALLA**: el
+    criterio fijado desde el principio es "no más de un envío por cambio real,
+    nada fuera de la ventana", no "detectar todos".
+  - **Ojo:** un OK con muchos cambios sin envío no dice que el sistema siga el
+    ritmo. Hay que leerlo junto con el conteo `k/16 cambios con envío`.
+- **Caso 4:** sin cambios. Aceptable = nada, o solo `dedo_pulgar`. Se reporta
+  además la hora de la señal METE, para separar lo que pasó antes y después de
+  meter la segunda mano.
+- **Caso 5:** sin cambios. Cualquier línea enviada, o un gesto activo al
+  empezar, es NO aceptable. Se reportan las horas de las señales PASA.
+
+### Tests
+
+```
+111 passed in 9.61s
+```
+Son 7 tests nuevos sobre los 104 anteriores: selección de casos, señales de
+cada caso, parseo de las señales internas (con la regex de ARRANCA todavía
+compatible), y caso 1 guiado (un envío por cambio con un cambio sin envío
+= OK; gesto intermedio no pedido = NO ACEPTABLE; envío repetido = NO
+ACEPTABLE; envío fuera de tolerancia = sin asignar).
+
+Ensayo en seco del guion con el tiempo acelerado (CUE escrito en el
+scratchpad, no en `benchmarks/`): genera las 16 señales CAMBIA, la señal METE
+y las 2 PASA, y el análisis las lee sin errores.
+
+## Fase D, sesión 2 — resultados de la repetición guiada (2026-10-13, 50cm)
+
+**CUE usado:** `benchmarks/fase_d_cue_hard_cases_20261013_190345.log`.
+Primer CUE a las 19:03:45,494, `FIN` a las 19:07:07,496. **Ventana:**
+19:03:44,494 → 19:07:17,496. JD corrió el guion **sin `--casos`**, así que
+entraron los 5 casos y no solo el 1, el 4 y el 5.
+**Descartado:** `fase_d_cue_hard_cases_20261013_190253.log` solo tiene la
+línea `PREPARA` del caso 1 (19:02:53,631). Es un arranque cortado y no se
+analiza.
+
+```
+analyze_hard_cases.py <log prod> benchmarks/fase_d_cue_hard_cases_20261013_190345.log --desde "2026-10-13 19:03:44,494" --hasta "2026-10-13 19:07:17,496"
+```
+
+| Caso | Veredicto (criterio fijado antes) | Líneas enviadas dentro del bloque |
+|---|---|---|
+| 1. movimiento_rapido (guiado) | **FALLA** (1 envío sin asignar) | 16 |
+| 2. mano_tapada_palma_abierta | OK | 0 (activo al empezar: `palma_abierta`) |
+| 3. mano_en_el_borde_puno_cerrado | OK | 0 (activo al empezar: `puño_cerrado`) |
+| 4. dos_manos_dedo_pulgar | **OK** | `19:05:59,792 dedo_pulgar (0.96)` |
+| 5. persona_detras_sin_gesto | **FALLA** | `19:06:42,961 palma_abierta (0.93)`, liberado a las 19:06:45,873 |
+
+### Caso 1: salida literal y lectura
+
+```
+resumen: 15/16 cambios con envío, 1 sin envío, 1 envío(s) sin asignar, 0 repetido(s)
+envío SIN ASIGNAR 19:03:56,801 palma_abierta
+```
+- **Envío sin asignar:** según los cuadros crudos, **no había mano en cuadro**
+  al ARRANCA (`dedos_extendidos=0` hasta las 19:03:55,926). La mano entra
+  **abierta** a las 19:03:56,127 y se confirma `palma_abierta` a las
+  19:03:56,801, antes de llegar al `puño_cerrado` pedido (que se envía a las
+  19:03:57,622). Es la postura de entrada de la mano, no un gesto intermedio
+  entre dos gestos pedidos. **Por el criterio fijado sigue siendo FALLA**, y
+  también lo sería para un actuador real: esa línea sí salió.
+- **Las 15 transiciones siguientes salieron limpias:** ningún gesto
+  intermedio, ningún envío repetido, un envío por cambio. El tiempo desde la
+  señal CAMBIA hasta el envío (incluye la reacción de JD) fue de 1548 a
+  2160 ms. El cambio 1 tardó 2127 ms porque la mano entró en ese momento.
+- **Cambio 16 "SIN envío":** sí se envió, pero **después del bloque**:
+  `19:04:28,111 Gesto detectado: dedo_menique (confianza=1.00)`, 2616 ms
+  después de su señal y 0,6 s después de `TERMINA` (19:04:27,495). El guion
+  solo deja 2 s después de la última señal, menos que la latencia observada.
+  **Es un límite del guion, no del sistema.** Si se repite, hay que dejar al
+  menos ~3 s de cola.
+
+### Caso 4: OK con el planteamiento corregido
+
+Con la mano del pulgar dentro primero, se envió **solo** `dedo_pulgar`
+(19:05:59,792). Después de la señal `METE` (19:06:05,496) no hubo ningún envío
+ni liberación hasta `TERMINA`. Esto concuerda con el diseño `num_hands=1` +
+modo VIDEO que describió JD. Qué mano procesó MediaPipe en cada cuadro sigue
+sin ser verificable desde el log.
+
+### Caso 5: FALLA, con correlación temporal con el primer cruce
+
+Cuadros crudos: mano con 5 dedos desde las **19:06:42,406**, **90 ms antes**
+de la señal `PASA [1/2]` (19:06:42,496). Se confirmó `palma_abierta` a las
+19:06:42,961 y se liberó a las 19:06:45,873. En el segundo cruce
+(`PASA [2/2]`, 19:06:55,496) solo hubo 2 cuadros aislados con gesto
+(19:06:56,437 `palma_abierta`; 19:07:05,722 `dedo_pulgar`), sin
+confirmación y sin envío. La coincidencia con el primer cruce es fuerte. **El
+log no permite saber de quién era la mano.** Ocurre en las dos corridas, así
+que no parece un accidente aislado.
+
+**Dato para Fases 9/10 (no es un cambio en esta fase):** el detector no
+distingue la mano del operador de la de alguien más en el fondo. Una palma
+visible de cualquier persona durante ~0,6 s (5 de 7 cuadros) basta para
+enviar una línea. Si eso debe impedirse, hace falta un criterio nuevo
+(tamaño o posición de la mano, zona de interés, o que el gesto se sostenga
+más tiempo) para decidir aparte. No se implementa nada aquí.
+
+### Casos 2 y 3: corrida extra, más débil que la primera
+
+Los dos dan OK, pero el gesto objetivo **ya estaba activo al empezar** (se
+confirmó durante PREPARA) y no hubo envíos dentro del bloque. Solo muestran que
+no se envió ningún gesto equivocado mientras se sostenía el objetivo tapado o
+en el borde. No vuelven a probar la confirmación en esas condiciones. La
+corrida de las 18:47 sigue siendo la evidencia principal para estos dos casos.
+
+### Pendiente de JD
+- Sensibilidad del cliente.
+- Caso 5, ambas corridas: ¿de quién era la mano que apareció?
+
+### Datos de JD recibidos después del análisis
+
+- **Sensibilidad del cliente: 7 fps**, la misma en todas las corridas de la
+  sesión 2. ~~Concuerda con el `fps_real` del log en las tres ventanas: 6,94–7,00
+  (liberación, 1203 líneas `Frame`), 6,96–6,99 (casos difíciles, 1481) y
+  6,98–6,99 (repetición guiada, 1496). Por tanto, el periodo entre cuadros de
+  toda la sesión fue de ≈143 ms~~ *(corregido el 2026-10-14: `fps_real` es un
+  promedio acumulado y no prueba un periodo uniforme)*. Lo que sí está medido en
+  la batería, sobre los timestamps de las líneas `Frame`: 1118 cuadros en
+  159,7 s = **7,00 cuadros/s de promedio**, numeración continua (0 cuadros
+  perdidos), separación entre cuadros p50 = 141 ms y p95 = 206 ms, y **18
+  huecos > 286 ms**, el mayor de **2463 ms**. El piso de liberación por
+  construcción es ≈16 × 143 ms ≈ 2,3 s solo cuando los cuadros llegan al ritmo
+  nominal.
+- **Caso 5**, palabras de JD: *"si se captó una mano al inicio fue mía por no
+  quitarla a tiempo"*.
+  **Contraste con el log (sin cambiar el veredicto):**
+  - En la corrida de las 18:47 sí hubo una mano de JD **al inicio**, pero
+    durante PREPARA: `palma_abierta` detectada a las 18:50:22,566 y liberada a
+    las 18:50:26,460, **antes** del ARRANCA (18:50:28,618). Como ya estaba
+    liberada al empezar, no entra en el veredicto ("activo al empezar:
+    ninguno").
+  - Los envíos que hacen FALLA **no son del inicio del bloque**:
+    `dedo_pulgar` a las 18:50:44,288 (15,7 s después del ARRANCA) y
+    `palma_abierta` a las 19:06:42,961 (5,5 s después del ARRANCA, 90 ms antes
+    de la señal `PASA [1/2]`).
+  - **Atribución de esos dos envíos: pendiente de que JD confirme si se refiere
+    a ellos.** Mientras tanto no se atribuyen ni a JD ni a la segunda persona.
+    El veredicto FALLA se mantiene igual: el criterio fijado es "cualquier
+    línea enviada", sea de quien sea la mano.
+- **Atribución del caso 5, confirmada por JD:** *"tuvo que ser mía, nunca
+  detectó la mano de la persona de atrás en el cliente"*. Se registra como
+  **relato de JD**: el log no lo confirma ni lo descarta. **Salvedad:** según
+  CLAUDE.md §5, el esqueleto de mano que muestra el cliente es un overlay
+  cosmético 100% client-side, independiente del detector del bridge. Que el
+  cliente no dibujara la mano de la otra persona **no prueba** que el bridge
+  no la haya visto. Con el relato de JD, la lectura más probable de las dos
+  FALLA del caso 5 es un **error de ejecución** (la mano de JD entró en
+  cuadro), no detección de una persona del fondo. Por eso el "dato para
+  Fases 9/10" sobre manos ajenas queda como **hipótesis no demostrada**, no
+  como hallazgo. El veredicto FALLA no cambia (el criterio fijado es
+  "cualquier línea enviada").
+
+## Fase D, sesión 2 — reporte de cierre (2026-10-13)
+
+**Rama:** `fase-d-herramientas-fix` (worktree `cva-pi-repo-fase-d-fix`),
+desde `993d0ea`. **Producción:** sin cambios en `2b74314`; solo se leyó.
+**Tests:** 111 pasan.
+
+### Qué se hizo
+1. Correcciones de herramientas antes de analizar: liberación como función
+   pura con su test, emparejamiento QUITA ↔ liberación por tiempo, estado
+   activo al empezar y liberaciones por bloque en los casos difíciles, y
+   corrección de la afirmación sobre 2288 ms.
+2. Medición real a 50 cm y 7 fps contra el servicio de producción: batería de
+   liberación (20 repeticiones) y casos difíciles.
+3. Repetición guiada (`--casos`, señales CAMBIA, METE y PASA), con los
+   criterios fijados antes de medir.
+
+### Resultados principales
+| Medición | Resultado |
+|---|---|
+| Liberación desde QUITA (n=17/20) | avg 3715 ms, p50 3669, p95 4558, máx 4975, mín 3077. **Sesgada hacia abajo:** 3 de 20 liberaron después del siguiente HAZ (≈5,3–5,9 s), así que el máximo real es ≈5,9 s |
+| Tiempo de sistema de confirmación | máx 660 ms, 0/21 por encima de AC3 (1500 ms) |
+| Gestos equivocados en la batería | 2 de 20 repeticiones (las dos de `puño_cerrado`, ~1 s) |
+| Caso 1, movimiento rápido guiado | FALLA por 1 envío (la mano entró abierta); 15/16 cambios limpios |
+| Caso 2, mano tapada | OK |
+| Caso 3, mano en el borde | OK |
+| Caso 4, dos manos (en orden) | OK en la repetición; FALLA en la primera corrida, que estaba mal planteada |
+| Caso 5, persona detrás | FALLA en las dos primeras corridas (según JD, su propia mano); **OK en la repetición limpia de las 19:19** (ver abajo) |
+
+### Datos de diseño para Fases 9/10 (no se cambia nada en esta fase)
+- La liberación depende de los fps: 16 cuadros sin mano son 2,0 s a 8 fps y
+  ≈2,7 s a 6 fps (el cliente permite 6–8 fps). **A eso se suma cualquier hueco
+  sin cuadros** (rep 3: +2463 ms). Si un actuador debe detenerse en un tiempo
+  garantizado, hay que expresar ese tiempo en segundos. *(Corregido el
+  2026-10-14: antes usaba un fps fuera del rango que permite el cliente.)*
+- La liberación real, incluyendo la reacción humana, llega a ≈5,9 s a 7 fps.
+- Con `num_hands=1` en modo VIDEO, el detector sigue a la primera mano que ve.
+  Una segunda mano no le quita el seguimiento (caso 4).
+
+### Brechas abiertas
+- Sin segunda persona de otro tono de piel.
+- Solo 50 cm.
+- Solo hasta el envío desde la Pi: no incluye el túnel ni la pantalla.
+- El caso 5 no tiene una corrida limpia; la atribución depende del relato de JD.
+- No se investigaron los 2 gestos equivocados de la batería ni el máximo de
+  4343 ms de la liberación del sistema.
+- El emparejamiento HAZ ↔ detección sigue siendo por orden.
+
+### Pendiente (decisión de JD, 2026-10-13: cerrar la sesión aquí)
+- [x] **Repetir el caso 5 (persona detrás) para tener una corrida limpia**, con
+  las manos de JD fuera de cuadro desde PREPARA y durante todo el bloque.
+  Comando:
+  `fase_d_hard_cases.py --casos persona_detras_sin_gesto`. Hasta entonces, el
+  caso 5 sigue en FALLA y la hipótesis de manos ajenas sigue sin demostrar.
+
+**Estado: sesión 2 de Fase D cerrada por decisión de JD**, con el caso 5
+pendiente. El PR de `fase-d-herramientas-fix` a `main` se abre solo con
+aprobación explícita de JD.
+
+## Fase D, sesión 2 — caso 5 repetido (2026-10-13, cierra el pendiente)
+
+**CUE:** `benchmarks/fase_d_cue_hard_cases_20261013_191943.log`, generado con
+el atajo nuevo `benchmarks/fase_d_caso5.py`, que corre solo el caso 5.
+Primer CUE a las 19:19:43,605, `FIN` a las 19:20:23,606. **Ventana:**
+19:19:42,605 → 19:20:33,606. Condiciones: 50cm, cliente a 7 fps
+(`fps_real` 6,99–7,00 en el bloque). Las manos de JD estuvieron escondidas
+desde antes de lanzar el guion, y la segunda persona cruzó con los brazos
+abajo en `PASA [1/2]` (19:19:58,605) y `PASA [2/2]` (19:20:11,605).
+
+Salida literal:
+```
+=== persona_detras_sin_gesto (objetivo=None) -- OK ===
+  gesto activo al empezar el bloque: ninguno
+  liberaciones dentro del bloque: 0
+  ningún gesto activo al empezar y ninguna línea enviada -- correcto
+```
+En toda la ventana no hubo ninguna línea `Gesto detectado` ni `Gesto liberado`.
+
+**Veredicto: OK.** El caso 5 tiene ahora una corrida limpia.
+
+**Cuadros crudos, para contexto (sin cambiar el veredicto):** de 210 cuadros
+`[diag]` dentro del bloque, 7 tuvieron algo distinto de "sin mano". Todos
+fueron aislados y ninguno llegó a confirmarse (hace falta 5 de 7):
+```
+19:19:58,056 puño_cerrado (0.93)    19:20:00,025 dedo_pulgar (0.74)
+19:20:14,748 puño_cerrado (0.96)    19:20:15,024 palma_abierta (0.98)
+19:20:16,864 palma_abierta (0.75)   19:20:21,765 / 19:20:21,863 sin gesto, dedos_extendidos=2
+```
+Los primeros aparecen alrededor de cada cruce (el primero, 0,55 s antes de
+`PASA [1/2]`). Muestran que el detector **sí ve cuadros sueltos con forma de
+mano mientras la persona pasa**, y que el `GestureStabilizer` los filtra. El
+log no dice de qué cuerpo eran. Con el margen actual (5 de 7 cuadros), el
+riesgo de manos ajenas queda **acotado pero no descartado** para Fases 9/10:
+una persona que se detenga en cuadro más de ~0,6 s con la mano visible sí
+podría confirmar un gesto. No se midió ese escenario.
+
+**Tests:** 112 pasan (+1: el atajo selecciona solo el caso 5).
+
+**Estado:** sesión 2 de Fase D cerrada sin pendientes de medición. Se mantienen
+las brechas abiertas del reporte de cierre. El PR de `fase-d-herramientas-fix`
+a `main` solo se abre con aprobación explícita de JD.
+
+## Fase D, sesión 2 — detalle de la batería, archivo de logs y corrección de fps (2026-10-14)
+
+Rama `fase-d-herramientas-fix`, mismo worktree. Producción y logs: solo lectura.
+No se cambió código del paquete `cva_gesture_bridge`.
+
+### a) Copia de solo lectura de las ventanas del log de producción
+
+El log de producción rota a medianoche y se borra a los 7 días
+(`logging_setup.py`, `TimedRotatingFileHandler(when="midnight",
+backupCount=retention_days)`). Al hacer la copia (2026-10-14 23:42), los datos
+del 13 seguían en el log activo, que no había rotado porque no había escrito
+nada desde las 19:34 del 13.
+
+**Ruta:** `~/video_analitica/cva-pi-repo-fase-d-fix/benchmarks/fase_d_logs_sesion2_20261013/`.
+Está ignorada por git (`.gitignore`: `benchmarks/fase_d_logs_*/`, comprobado con
+`git check-ignore`), los archivos tienen permisos 444 y hay un `SHA256SUMS`.
+
+| Archivo | Ventana | Líneas |
+|---|---|---|
+| `prod_liberacion_184017-184308.log` | 18:40:17,433 → 18:43:08,446 | 2437 |
+| `prod_casos_dificiles_184737-185108.log` | 18:47:37,615 → 18:51:08,618 | 2979 |
+| `prod_repeticion_guiada_190344-190717.log` | 19:03:44,494 → 19:07:17,496 | 3005 |
+| `prod_caso5_191942-192033.log` | 19:19:42,605 → 19:20:33,606 | 714 |
+
+También se copiaron los 6 CUE de la sesión, incluidos los 2 cortados. Para
+comprobar que las copias bastan, se analizaron de nuevo: la salida de
+liberación es idéntica a la del log de producción (solo cambia la ruta del CUE
+en el encabezado), y los veredictos de casos difíciles y de la repetición
+guiada son los mismos.
+
+### b) Aciertos AC3 de la batería de 20 repeticiones
+
+**Definición** (`benchmarks/fase_d_battery_detail.py`, función pura
+`classify_battery_hits()` con su test): el intervalo de la repetición i es
+[HAZ_i, HAZ_{i+1}), y la última termina en la línea `FIN` del CUE.
+- **Acierto limpio:** el primer `Gesto detectado` del intervalo es el gesto
+  pedido (se confirma sin enviar antes otro gesto).
+- **Acierto tras error:** el gesto pedido se envía, pero después de otro gesto.
+- **Sin envío del pedido:** el gesto pedido no se envía en el intervalo.
+
+Aparte se marca si **después** del pedido se envió otro gesto distinto. No
+cambia la categoría, que sigue la definición pedida.
+
+Salida literal (sobre la copia archivada):
+```
+=== (b) Aciertos por repetición (intervalo [HAZ_i, HAZ_i+1); la última hasta FIN) ===
+Acierto limpio = el primer 'Gesto detectado' del intervalo es el pedido.
+  [ 1] HAZ 18:40:18,433 puño_cerrado   -> acierto limpio       envíos: puño_cerrado@+2800ms, dedo_menique@+3908ms  ** después se envió otro gesto
+  [ 2] HAZ 18:40:26,433 puño_cerrado   -> acierto limpio       envíos: puño_cerrado@+2250ms
+  [ 3] HAZ 18:40:34,434 puño_cerrado   -> acierto limpio       envíos: puño_cerrado@+2002ms
+  [ 4] HAZ 18:40:42,434 puño_cerrado   -> acierto tras error   envíos: dedo_pulgar@+3180ms, puño_cerrado@+4174ms
+  [ 5] HAZ 18:40:50,436 puño_cerrado   -> acierto limpio       envíos: puño_cerrado@+2235ms
+  [ 6] HAZ 18:40:58,437 palma_abierta  -> acierto limpio       envíos: palma_abierta@+1824ms
+  [ 7] HAZ 18:41:06,437 palma_abierta  -> acierto limpio       envíos: palma_abierta@+1673ms
+  [ 8] HAZ 18:41:14,438 palma_abierta  -> acierto limpio       envíos: palma_abierta@+2118ms
+  [ 9] HAZ 18:41:22,438 palma_abierta  -> acierto limpio       envíos: palma_abierta@+2126ms
+  [10] HAZ 18:41:30,439 palma_abierta  -> acierto limpio       envíos: palma_abierta@+1982ms
+  [11] HAZ 18:41:38,439 dedo_pulgar    -> acierto limpio       envíos: dedo_pulgar@+2291ms
+  [12] HAZ 18:41:46,440 dedo_pulgar    -> acierto limpio       envíos: dedo_pulgar@+1712ms
+  [13] HAZ 18:41:54,441 dedo_pulgar    -> acierto limpio       envíos: dedo_pulgar@+2293ms
+  [14] HAZ 18:42:02,442 dedo_pulgar    -> acierto limpio       envíos: dedo_pulgar@+3037ms
+  [15] HAZ 18:42:10,442 dedo_pulgar    -> acierto limpio       envíos: dedo_pulgar@+1868ms
+  [16] HAZ 18:42:18,443 dedo_menique   -> acierto limpio       envíos: dedo_menique@+2320ms
+  [17] HAZ 18:42:26,444 dedo_menique   -> acierto limpio       envíos: dedo_menique@+1609ms
+  [18] HAZ 18:42:34,444 dedo_menique   -> acierto limpio       envíos: dedo_menique@+1605ms
+  [19] HAZ 18:42:42,445 dedo_menique   -> acierto limpio       envíos: dedo_menique@+1618ms
+  [20] HAZ 18:42:50,445 dedo_menique   -> acierto limpio       envíos: dedo_menique@+1776ms
+Aciertos limpios: 19/20 = 95%  |  tras error: 1  |  sin envío: 0  |  con otro gesto enviado después del pedido: 1
+```
+
+**Resultado: 19/20 = 95 % de aciertos limpios.** Con esta definición, la rep 1
+cuenta como acierto limpio aunque **después** se envió `dedo_menique` (ver c1).
+Si se exigiera además "ningún otro gesto en el intervalo", serían 18/20 = 90 %.
+
+Los ms del tipo `@+Nms` se miden desde la señal HAZ, así que **incluyen la
+reacción humana**. No son el tiempo de sistema de AC3: ese ya se reportó
+(máx 660 ms, 0/21 por encima de 1500 ms).
+
+### c1) Las dos repeticiones con gesto equivocado
+
+- **Rep 1 (pedido `puño_cerrado`): mano SALIENDO, no entrando ni ruido.** La mano
+  entra a las 18:40:20,906 y se confirma `puño_cerrado` correctamente (18:40:21,233).
+  La QUITA llega a las 18:40:21,433. A partir de las 18:40:21,801 hay **5 cuadros
+  seguidos** con `dedo_menique` (1 dedo, confianza 0,99–1,00), que se confirma a
+  las 18:40:22,341. Siguen 3 cuadros más y desde las 18:40:22,951 ya no hay mano.
+  Es la forma de la mano al retirarse (un dedo queda extendido mientras sale),
+  y fueron 8 cuadros consistentes, no uno suelto.
+- **Rep 4 (pedido `puño_cerrado`): mano ENTRANDO, durante una ráfaga de cuadros
+  atrasados.** Antes del envío equivocado, los cuadros muestran una mano parcial
+  que aparece y desaparece: `palma_abierta` con 4 dedos (18:40:44,193),
+  `puño_cerrado` (18:40:44,689), cuadros con 3 y 2 dedos, intercalados con
+  cuadros sin mano. Luego vienen 5 cuadros de `dedo_pulgar` entre 18:40:45,392 y
+  18:40:45,614 (con 2 cuadros sin gesto en medio), y se confirma `dedo_pulgar`.
+  Es la mano formando el puño con el pulgar todavía extendido. **Lo
+  determinante:** esos cuadros se procesaron cada ~30 ms, no cada ~143 ms, porque
+  venían justo después de un hueco de 853 ms (18:40:43,340 → 18:40:44,193) y la
+  Pi estaba poniéndose al día con cuadros acumulados. El estabilizador cuenta
+  **cuadros**, no tiempo: confirmó una forma de transición que en el reloj duró
+  ~0,22 s, cuando a ritmo nominal 5 cuadros cubren ~0,7 s. Un segundo después se
+  envía el `puño_cerrado` correcto (18:40:46,608).
+
+### c2) Liberaciones > 5 s (reps 3, 7 y 15) y el máximo de 4343 ms
+
+Salida literal:
+```
+=== (c2)Liberaciones: cuadros entre el último coincidente y la liberación; huecos > 286ms entre líneas Frame ===
+  [PEDIDA/MÁXIMO] QUITA previa rep 3: puño_cerrado último coincidente 18:40:38,664 -> liberado 18:40:43,007 = 4343ms | cuadros=16 (con mano 2, sin mano 14) | separación máx entre Frame=2463ms | huecos=1 (2463ms en huecos)
+      hueco desde 18:40:40,101: 2463ms sin cuadros
+  [PEDIDA] QUITA previa rep 7: palma_abierta último coincidente 18:41:13,030 -> liberado 18:41:15,332 = 2302ms | cuadros=16 (con mano 0, sin mano 16) | separación máx entre Frame=198ms | huecos=0 (0ms en huecos)
+  [PEDIDA] QUITA previa rep 15: dedo_pulgar último coincidente 18:42:16,473 -> liberado 18:42:18,780 = 2307ms | cuadros=16 (con mano 0, sin mano 16) | separación máx entre Frame=336ms | huecos=1 (336ms en huecos)
+      hueco desde 18:42:17,496: 336ms sin cuadros
+  Todas las liberaciones reproducidas: n=21, cuadros min=16 max=18, ms min=2195 max=4343
+```
+
+Desglose de la liberación desde la QUITA (el último cuadro coincidente se
+obtuvo con la misma herramienta):
+
+| Rep | QUITA → último cuadro con el gesto | Cuadros en ese tramo | Último coincidente → liberado | Causa |
+|---|---|---|---|---|
+| 3 | 1230 ms | 9, todos con el gesto | **4343 ms = 16 cuadros + 1 hueco de 2463 ms** | **Hueco sin cuadros.** Además es el máximo de 4343 ms |
+| 7 | 3592 ms | 25: 11 con el gesto y 13 sin mano, intercalados | 2302 ms = 16 cuadros, sin huecos | **Contador reiniciado:** cuadros sueltos de `palma_abierta` (confianza 0,74–0,79, 4 dedos) después de la QUITA. Cada cuadro coincidente pone el contador de fallos a 0 (`detector.py:142-145`) |
+| 15 | 3031 ms | 22, **todos** con el gesto | 2307 ms = 16 cuadros, hueco máximo 336 ms | **La mano siguió en cuadro** con el pulgar 3 s después de la QUITA. Es reacción humana, no el sistema |
+
+**Contador de cuadros vs hueco sin cuadros:** en las 21 liberaciones
+reproducidas, el contador fue siempre de **16 a 18 cuadros**. Solo la rep 3
+tuvo un hueco grande dentro del tramo de liberación. En la batería completa,
+la numeración de cuadros es continua (1118 cuadros, #2091 → #3208, 0
+perdidos) y hay **18 separaciones mayores de 286 ms** entre líneas `Frame`,
+incluidas una de **2463 ms** y otra de **853 ms**. Después del hueco grande
+llegaron 40 cuadros en 3,27 s (~12/s): se acumularon y se procesaron de golpe.
+**Desde el log no se puede saber dónde se acumularon** (cliente, túnel SSH o la
+propia Pi): el log solo marca cuándo se leyó cada cuadro, no cuándo se capturó.
+
+**Lo que esto significa para Fases 9/10** (sin cambios en esta fase): la
+liberación y la confirmación se cuentan en **cuadros**, no en tiempo. Por eso
+(1) un hueco sin cuadros alarga la liberación en todo lo que dure el hueco, y
+(2) una ráfaga de cuadros atrasados puede confirmar una forma de transición en
+mucho menos tiempo real del que suponen los 5 de 7 cuadros. Además, un único
+cuadro coincidente reinicia la cuenta de liberación (rep 7).
+
+### d) Corrección del dato de fps
+
+Corregido en el lugar (sección B de la preparación, resultados, "Datos de JD" y
+"Datos de diseño para Fases 9/10"):
+- El cliente permite **6 a 8 fps** (`CVA_ConfigSidebar.tsx`, líneas 141-143,
+  según JD; ese archivo no está en esta Pi). Entonces 16 cuadros son **2,0 a
+  2,7 s**, y 20 cuadros 2,5 a 3,3 s, **siempre que los cuadros lleguen al ritmo
+  nominal**. Se quitaron todas las menciones al valor anterior que quedaba fuera
+  de ese rango. El test de liberación ahora usa 125, 143 y 167 ms (8, 7 y 6 fps).
+- Además se corrigió algo que no estaba pedido pero era incorrecto: `fps_real`
+  del log es un **promedio acumulado** (`tcp_server.py:39-42`), y yo lo había
+  usado como prueba de un periodo uniforme de ≈143 ms. También estaba mal la
+  hipótesis de que el máximo de 4343 ms venía del umbral de 20 cuadros: fue un
+  hueco (c2).
+
+### Herramienta y tests
+- `benchmarks/fase_d_battery_detail.py` (nuevo, solo lee). Funciones puras:
+  `classify_battery_hits()`, `release_span_detail()`, `parse_frame_lines()`,
+  `frames_before()`.
+- 4 tests nuevos y 1 ajustado (los periodos del test de liberación).
+
+Salida literal de `pytest -q`:
+```
+........................................................................ [ 62%]
+............................................                             [100%]
+116 passed in 8.44s
+```
