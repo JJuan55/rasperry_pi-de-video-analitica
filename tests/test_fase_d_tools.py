@@ -241,7 +241,8 @@ def test_system_release_equals_required_misses_times_frame_period():
     from cva_gesture_bridge.vision.detector import GestureStabilizer
     misses_needed = GestureStabilizer()._release_after_misses_no_hand
 
-    for period_ms in (143, 250):
+    # extremos que permite el cliente: 8 fps (125ms) y 6 fps (~167ms), y 7 fps
+    for period_ms in (125, 143, 167):
         raw = _synthetic_hold_then_no_hand(period_ms)
         confirm_events, release_events = afr.replay_stabilizer(raw)
         assert len(confirm_events) == 1
@@ -255,9 +256,9 @@ def test_system_release_changes_when_frame_period_changes():
     # Mismos cuadros, distinto fps -> distinta liberación: el número depende
     # del periodo real entre cuadros, no es una constante del sistema.
     at_7fps, _ = afr.system_release_times_ms(afr.replay_stabilizer(_synthetic_hold_then_no_hand(143))[1])
-    at_4fps, _ = afr.system_release_times_ms(afr.replay_stabilizer(_synthetic_hold_then_no_hand(250))[1])
-    assert at_7fps != at_4fps
-    assert at_4fps[0] > at_7fps[0]
+    at_6fps, _ = afr.system_release_times_ms(afr.replay_stabilizer(_synthetic_hold_then_no_hand(167))[1])
+    assert at_7fps != at_6fps
+    assert at_6fps[0] > at_7fps[0]
 
 
 def test_raw_observations_from_events_keeps_order_and_none():
@@ -474,3 +475,69 @@ def test_caso5_shortcut_selects_only_persona_detras():
     casos = fase_d_caso5.ARGS[fase_d_caso5.ARGS.index("--casos") + 1]
     sel = fhc.select_cases(casos)
     assert [c[0] for c in sel] == ["persona_detras_sin_gesto"]
+
+
+# --- Detalle de la batería: aciertos AC3 y liberación (cuadros vs huecos) ---
+
+import fase_d_battery_detail as fbd  # noqa: E402
+
+
+def test_classify_battery_hits_categories():
+    cues = [
+        _cue(0, 1, "HAZ", "puño_cerrado"), _cue(3, 1, "QUITA"),
+        _cue(8, 2, "HAZ", "puño_cerrado"), _cue(11, 2, "QUITA"),
+        _cue(16, 3, "HAZ", "palma_abierta"), _cue(19, 3, "QUITA"),
+        _cue(24, 4, "HAZ", "dedo_pulgar"), _cue(27, 4, "QUITA"),
+    ]
+    events = [
+        (_ts(1.5), "detectado", ("puño_cerrado", 1.0)),     # rep 1: limpio...
+        (_ts(3.5), "detectado", ("dedo_menique", 1.0)),     # ...con otro después
+        (_ts(9.0), "detectado", ("dedo_pulgar", 1.0)),      # rep 2: error primero
+        (_ts(10.0), "detectado", ("puño_cerrado", 1.0)),    # ...y luego el pedido
+        (_ts(18.0), "liberado", "puño_cerrado"),            # rep 3: nada pedido
+        (_ts(25.5), "detectado", ("dedo_pulgar", 1.0)),     # rep 4: limpio
+        (_ts(40.0), "detectado", ("palma_abierta", 1.0)),   # después de FIN: fuera
+    ]
+    rows = fbd.classify_battery_hits(cues, events, end_ts=_ts(32))
+    cats = [r["categoria"] for r in rows]
+    assert cats == [fbd.ACIERTO_LIMPIO, fbd.ACIERTO_TRAS_ERROR, fbd.SIN_ENVIO, fbd.ACIERTO_LIMPIO]
+    assert rows[0]["otro_despues"] is True and rows[3]["otro_despues"] is False
+    assert round(rows[0]["ms_hasta_pedido"]) == 1500
+    assert round(rows[1]["ms_hasta_pedido"]) == 2000
+    assert rows[3]["envios"] == [(_ts(25.5), "dedo_pulgar")]  # el envío de 40s no entra
+
+
+def test_release_span_detail_separates_frame_counter_from_gap():
+    # 16 cuadros sin mano a 143ms, pero con un hueco de 2s entre el 8 y el 9.
+    from datetime import timedelta
+    last_match = _ts(0)
+    raw, frames = [], [(last_match, 1)]
+    t = last_match
+    for i in range(16):
+        t = t + timedelta(milliseconds=2143 if i == 8 else 143)
+        raw.append((t, None, 0))
+        frames.append((t, i + 2))
+    d = fbd.release_span_detail(raw, frames, last_match, t)
+    assert d["cuadros"] == 16 and d["sin_mano"] == 16 and d["con_mano"] == 0
+    assert len(d["huecos"]) == 1 and round(d["huecos"][0][1]) == 2143
+    assert round(d["ms"]) == 16 * 143 + 2000
+    assert round(d["max_sep_ms"]) == 2143
+
+
+def test_release_span_detail_no_gap_at_nominal_rate():
+    from datetime import timedelta
+    last_match = _ts(0)
+    raw = [(last_match + timedelta(milliseconds=143 * (i + 1)), None, 0) for i in range(16)]
+    frames = [(last_match, 1)] + [(ts, i + 2) for i, (ts, _, _) in enumerate(raw)]
+    d = fbd.release_span_detail(raw, frames, last_match, raw[-1][0])
+    assert d["huecos"] == [] and d["ms_en_huecos"] == 0
+    assert round(d["ms"]) == 16 * 143
+
+
+def test_parse_frame_lines_real_format():
+    lines = [
+        "2026-10-13 18:40:17,510 INFO cva_gesture_bridge.transport.tcp_server: Frame #2084 de ('127.0.0.1', 47486): 9708 bytes, fps_real=6.99, latencia_ms=140.3\n",
+        "2026-10-13 18:40:17,511 INFO __main__: [diag] Sin gesto reconocido en este frame (dedos_extendidos=0)\n",
+    ]
+    frames = fbd.parse_frame_lines(lines)
+    assert len(frames) == 1 and frames[0][1] == 2084

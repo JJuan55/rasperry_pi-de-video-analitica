@@ -2531,8 +2531,8 @@ real de la sesión 1 (50cm): avg=2349ms, p50=2339ms, max=2476ms, min=2262ms —
 > **16 × el periodo real entre cuadros**. No es una validación independiente
 > del contador; lo único que aporta el dato real es el periodo entre cuadros
 > (fps del cliente). Ahora hay un test que lo afirma de forma explícita
-> (`test_system_release_equals_required_misses_times_frame_period`: 16 × 143ms y
-> 16 × 250ms, y que cambia si cambia el periodo). Al recalcularlo con la
+> (`test_system_release_equals_required_misses_times_frame_period`: 16 × 125ms y
+> 16 × 167ms, los extremos de 8 y 6 fps, y que cambia si cambia el periodo). Al recalcularlo con la
 > herramienta refactorizada sobre el archivo archivado de la sesión 1
 > (`benchmarks/fase_d_run_sin_condicion.log`) da avg=2348ms, p50=2338ms,
 > max=2476ms, min=2262ms. La salida es idéntica byte a byte a la versión anterior
@@ -2540,14 +2540,21 @@ real de la sesión 1 (50cm): avg=2349ms, p50=2339ms, max=2476ms, min=2262ms —
 > números de arriba **no está explicada**: no quedó registrado contra qué
 > archivo o ventana exacta se calcularon. Queda anotada, sin atribuirle una causa.
 >
-> **Dato para Fases 9/10:** la liberación **depende de los fps**. 16 cuadros a
-> 4–8 fps (periodo de 250–125ms) son **~2 a ~4 s** (16 × 125ms = 2000ms;
-> 16 × 250ms = 4000ms). Con mano presente pero ambigua el umbral es 20
-> cuadros (`GESTURE_RELEASE_AFTER_MISSES=20`): 2,5 a 5 s. Si en Fase 9/10 un
+> **Dato para Fases 9/10** *(corregido el 2026-10-14: la versión anterior usaba
+> un rango de fps que el cliente no permite)*: la liberación **depende de
+> los fps**. El cliente permite configurar **de 6 a 8 fps**
+> (`CVA_ConfigSidebar.tsx`, líneas 141-143, según JD; ese archivo es del repo
+> del cliente y no está en esta Pi ni en `reference/`). Por tanto, 16 cuadros
+> son **2,0 a 2,7 s** (16 × 125ms = 2000ms a 8 fps; 16 × 167ms ≈ 2667ms a 6 fps).
+> Con mano presente pero ambigua el umbral es 20 cuadros
+> (`GESTURE_RELEASE_AFTER_MISSES=20`): 2,5 a 3,3 s. **Estos rangos suponen
+> cuadros llegando al ritmo nominal.** Un hueco sin cuadros se suma entero
+> (ver "detalle de la batería": rep 3, 16 cuadros + 2463 ms de hueco = 4343 ms).
+> Si en Fase 9/10 un
 > actuador debe detenerse en un tiempo máximo garantizado, ese tiempo tiene
 > que expresarse en segundos y no en cuadros, o el contador tiene que
-> convertirse a tiempo. Con el diseño actual, una caída de fps del cliente
-> alarga la liberación de forma proporcional. No se cambia nada del servicio
+> convertirse a tiempo. Con el diseño actual, un fps más bajo o un hueco en la
+> llegada de cuadros alarga la liberación. No se cambia nada del servicio
 > aquí: queda como dato de diseño para esas fases.
 
 ### C. Batería corta de liberación (20 repeticiones)
@@ -2700,7 +2707,7 @@ archivado de la sesión 1 es idéntica (`diff` vacío) entre la versión anterio
 (`993d0ea`) y la refactorizada.
 
 Tests nuevos: `test_system_release_equals_required_misses_times_frame_period`
-(liberación = `_release_after_misses_no_hand` × periodo, a 143ms y a 250ms),
+(liberación = `_release_after_misses_no_hand` × periodo, a 125ms y a 167ms: 8 y 6 fps),
 `test_system_release_changes_when_frame_period_changes` y
 `test_raw_observations_from_events_keeps_order_and_none`.
 
@@ -2853,12 +2860,20 @@ Tiempo de sistema -- avg=519ms p50=525ms p95=599ms max=660ms min=222ms
 Repeticiones que superan AC3 (<1500ms): 0/21
 Tiempo de liberación DEL SISTEMA (...) -- n=21 avg=2424ms p50=2311ms max=4343ms min=2195ms
 ```
-El fps real en la ventana fue de 6,94 a 7,00 (1203 líneas `Frame`), así que
+~~El fps real en la ventana fue de 6,94 a 7,00 (1203 líneas `Frame`), así que
 el piso de liberación por construcción es ≈16 × 143 ms ≈ 2,3 s, como se
 corrigió arriba. El máximo de 4343 ms de la liberación del sistema no es la
 regla de 16 cuadros: cuadra con el umbral de 20 cuadros (mano presente pero
 ambigua) más algún cuadro con forma ambigua que reinicia o retrasa la cuenta.
-**No se investigó cuál repetición fue; queda abierto.**
+**No se investigó cuál repetición fue; queda abierto.**~~
+
+> **Corrección (2026-10-14), las dos afirmaciones tachadas eran incorrectas:**
+> (1) `fps_real` es el promedio **acumulado desde que se abrió la conexión**
+> (`tcp_server.py:39-42`), no el fps del momento. Por eso marca ~7 todo el rato y
+> no muestra huecos ni ráfagas. (2) El máximo de 4343 ms **no** fue el umbral de
+> 20 cuadros: fue la rep 3, con 16 cuadros (14 sin mano, 2 con mano) más un
+> **hueco de 2463 ms sin cuadros**. Detalle en "Fase D, sesión 2 — detalle de la
+> batería".
 
 **Gestos equivocados confirmados durante la batería** (visibles en la salida
 literal, marcados CONTAMINADA):
@@ -3087,11 +3102,17 @@ corrida de las 18:47 sigue siendo la evidencia principal para estos dos casos.
 ### Datos de JD recibidos después del análisis
 
 - **Sensibilidad del cliente: 7 fps**, la misma en todas las corridas de la
-  sesión 2. Concuerda con el `fps_real` del log en las tres ventanas: 6,94–7,00
+  sesión 2. ~~Concuerda con el `fps_real` del log en las tres ventanas: 6,94–7,00
   (liberación, 1203 líneas `Frame`), 6,96–6,99 (casos difíciles, 1481) y
   6,98–6,99 (repetición guiada, 1496). Por tanto, el periodo entre cuadros de
-  toda la sesión fue de ≈143 ms, y el piso de liberación por construcción es
-  ≈16 × 143 ms ≈ 2,3 s (ver la corrección de la sección B).
+  toda la sesión fue de ≈143 ms~~ *(corregido el 2026-10-14: `fps_real` es un
+  promedio acumulado y no prueba un periodo uniforme)*. Lo que sí está medido en
+  la batería, sobre los timestamps de las líneas `Frame`: 1118 cuadros en
+  159,7 s = **7,00 cuadros/s de promedio**, numeración continua (0 cuadros
+  perdidos), separación entre cuadros p50 = 141 ms y p95 = 206 ms, y **18
+  huecos > 286 ms**, el mayor de **2463 ms**. El piso de liberación por
+  construcción es ≈16 × 143 ms ≈ 2,3 s solo cuando los cuadros llegan al ritmo
+  nominal.
 - **Caso 5**, palabras de JD: *"si se captó una mano al inicio fue mía por no
   quitarla a tiempo"*.
   **Contraste con el log (sin cambiar el veredicto):**
@@ -3150,9 +3171,11 @@ desde `993d0ea`. **Producción:** sin cambios en `2b74314`; solo se leyó.
 | Caso 5, persona detrás | FALLA en las dos primeras corridas (según JD, su propia mano); **OK en la repetición limpia de las 19:19** (ver abajo) |
 
 ### Datos de diseño para Fases 9/10 (no se cambia nada en esta fase)
-- La liberación depende de los fps: 16 cuadros sin mano equivalen a ~2 s a
-  8 fps y a ~4 s a 4 fps. Si un actuador debe detenerse en un tiempo
-  garantizado, hay que expresar ese tiempo en segundos.
+- La liberación depende de los fps: 16 cuadros sin mano son 2,0 s a 8 fps y
+  ≈2,7 s a 6 fps (el cliente permite 6–8 fps). **A eso se suma cualquier hueco
+  sin cuadros** (rep 3: +2463 ms). Si un actuador debe detenerse en un tiempo
+  garantizado, hay que expresar ese tiempo en segundos. *(Corregido el
+  2026-10-14: antes usaba un fps fuera del rango que permite el cliente.)*
 - La liberación real, incluyendo la reacción humana, llega a ≈5,9 s a 7 fps.
 - Con `num_hands=1` en modo VIDEO, el detector sigue a la primera mano que ve.
   Una segunda mano no le quita el seguimiento (caso 4).
@@ -3220,3 +3243,170 @@ podría confirmar un gesto. No se midió ese escenario.
 las brechas abiertas del reporte de cierre. El PR de `fase-d-herramientas-fix`
 a `main` solo se abre con aprobación explícita de JD.
 
+## Fase D, sesión 2 — detalle de la batería, archivo de logs y corrección de fps (2026-10-14)
+
+Rama `fase-d-herramientas-fix`, mismo worktree. Producción y logs: solo lectura.
+No se cambió código del paquete `cva_gesture_bridge`.
+
+### a) Copia de solo lectura de las ventanas del log de producción
+
+El log de producción rota a medianoche y se borra a los 7 días
+(`logging_setup.py`, `TimedRotatingFileHandler(when="midnight",
+backupCount=retention_days)`). Al hacer la copia (2026-10-14 23:42), los datos
+del 13 seguían en el log activo, que no había rotado porque no había escrito
+nada desde las 19:34 del 13.
+
+**Ruta:** `~/video_analitica/cva-pi-repo-fase-d-fix/benchmarks/fase_d_logs_sesion2_20261013/`.
+Está ignorada por git (`.gitignore`: `benchmarks/fase_d_logs_*/`, comprobado con
+`git check-ignore`), los archivos tienen permisos 444 y hay un `SHA256SUMS`.
+
+| Archivo | Ventana | Líneas |
+|---|---|---|
+| `prod_liberacion_184017-184308.log` | 18:40:17,433 → 18:43:08,446 | 2437 |
+| `prod_casos_dificiles_184737-185108.log` | 18:47:37,615 → 18:51:08,618 | 2979 |
+| `prod_repeticion_guiada_190344-190717.log` | 19:03:44,494 → 19:07:17,496 | 3005 |
+| `prod_caso5_191942-192033.log` | 19:19:42,605 → 19:20:33,606 | 714 |
+
+También se copiaron los 6 CUE de la sesión, incluidos los 2 cortados. Para
+comprobar que las copias bastan, se analizaron de nuevo: la salida de
+liberación es idéntica a la del log de producción (solo cambia la ruta del CUE
+en el encabezado), y los veredictos de casos difíciles y de la repetición
+guiada son los mismos.
+
+### b) Aciertos AC3 de la batería de 20 repeticiones
+
+**Definición** (`benchmarks/fase_d_battery_detail.py`, función pura
+`classify_battery_hits()` con su test): el intervalo de la repetición i es
+[HAZ_i, HAZ_{i+1}), y la última termina en la línea `FIN` del CUE.
+- **Acierto limpio:** el primer `Gesto detectado` del intervalo es el gesto
+  pedido (se confirma sin enviar antes otro gesto).
+- **Acierto tras error:** el gesto pedido se envía, pero después de otro gesto.
+- **Sin envío del pedido:** el gesto pedido no se envía en el intervalo.
+
+Aparte se marca si **después** del pedido se envió otro gesto distinto. No
+cambia la categoría, que sigue la definición pedida.
+
+Salida literal (sobre la copia archivada):
+```
+=== (b) Aciertos por repetición (intervalo [HAZ_i, HAZ_i+1); la última hasta FIN) ===
+Acierto limpio = el primer 'Gesto detectado' del intervalo es el pedido.
+  [ 1] HAZ 18:40:18,433 puño_cerrado   -> acierto limpio       envíos: puño_cerrado@+2800ms, dedo_menique@+3908ms  ** después se envió otro gesto
+  [ 2] HAZ 18:40:26,433 puño_cerrado   -> acierto limpio       envíos: puño_cerrado@+2250ms
+  [ 3] HAZ 18:40:34,434 puño_cerrado   -> acierto limpio       envíos: puño_cerrado@+2002ms
+  [ 4] HAZ 18:40:42,434 puño_cerrado   -> acierto tras error   envíos: dedo_pulgar@+3180ms, puño_cerrado@+4174ms
+  [ 5] HAZ 18:40:50,436 puño_cerrado   -> acierto limpio       envíos: puño_cerrado@+2235ms
+  [ 6] HAZ 18:40:58,437 palma_abierta  -> acierto limpio       envíos: palma_abierta@+1824ms
+  [ 7] HAZ 18:41:06,437 palma_abierta  -> acierto limpio       envíos: palma_abierta@+1673ms
+  [ 8] HAZ 18:41:14,438 palma_abierta  -> acierto limpio       envíos: palma_abierta@+2118ms
+  [ 9] HAZ 18:41:22,438 palma_abierta  -> acierto limpio       envíos: palma_abierta@+2126ms
+  [10] HAZ 18:41:30,439 palma_abierta  -> acierto limpio       envíos: palma_abierta@+1982ms
+  [11] HAZ 18:41:38,439 dedo_pulgar    -> acierto limpio       envíos: dedo_pulgar@+2291ms
+  [12] HAZ 18:41:46,440 dedo_pulgar    -> acierto limpio       envíos: dedo_pulgar@+1712ms
+  [13] HAZ 18:41:54,441 dedo_pulgar    -> acierto limpio       envíos: dedo_pulgar@+2293ms
+  [14] HAZ 18:42:02,442 dedo_pulgar    -> acierto limpio       envíos: dedo_pulgar@+3037ms
+  [15] HAZ 18:42:10,442 dedo_pulgar    -> acierto limpio       envíos: dedo_pulgar@+1868ms
+  [16] HAZ 18:42:18,443 dedo_menique   -> acierto limpio       envíos: dedo_menique@+2320ms
+  [17] HAZ 18:42:26,444 dedo_menique   -> acierto limpio       envíos: dedo_menique@+1609ms
+  [18] HAZ 18:42:34,444 dedo_menique   -> acierto limpio       envíos: dedo_menique@+1605ms
+  [19] HAZ 18:42:42,445 dedo_menique   -> acierto limpio       envíos: dedo_menique@+1618ms
+  [20] HAZ 18:42:50,445 dedo_menique   -> acierto limpio       envíos: dedo_menique@+1776ms
+Aciertos limpios: 19/20 = 95%  |  tras error: 1  |  sin envío: 0  |  con otro gesto enviado después del pedido: 1
+```
+
+**Resultado: 19/20 = 95 % de aciertos limpios.** Con esta definición, la rep 1
+cuenta como acierto limpio aunque **después** se envió `dedo_menique` (ver c1).
+Si se exigiera además "ningún otro gesto en el intervalo", serían 18/20 = 90 %.
+
+Los ms del tipo `@+Nms` se miden desde la señal HAZ, así que **incluyen la
+reacción humana**. No son el tiempo de sistema de AC3: ese ya se reportó
+(máx 660 ms, 0/21 por encima de 1500 ms).
+
+### c1) Las dos repeticiones con gesto equivocado
+
+- **Rep 1 (pedido `puño_cerrado`): mano SALIENDO, no entrando ni ruido.** La mano
+  entra a las 18:40:20,906 y se confirma `puño_cerrado` correctamente (18:40:21,233).
+  La QUITA llega a las 18:40:21,433. A partir de las 18:40:21,801 hay **5 cuadros
+  seguidos** con `dedo_menique` (1 dedo, confianza 0,99–1,00), que se confirma a
+  las 18:40:22,341. Siguen 3 cuadros más y desde las 18:40:22,951 ya no hay mano.
+  Es la forma de la mano al retirarse (un dedo queda extendido mientras sale),
+  y fueron 8 cuadros consistentes, no uno suelto.
+- **Rep 4 (pedido `puño_cerrado`): mano ENTRANDO, durante una ráfaga de cuadros
+  atrasados.** Antes del envío equivocado, los cuadros muestran una mano parcial
+  que aparece y desaparece: `palma_abierta` con 4 dedos (18:40:44,193),
+  `puño_cerrado` (18:40:44,689), cuadros con 3 y 2 dedos, intercalados con
+  cuadros sin mano. Luego vienen 5 cuadros de `dedo_pulgar` entre 18:40:45,392 y
+  18:40:45,614 (con 2 cuadros sin gesto en medio), y se confirma `dedo_pulgar`.
+  Es la mano formando el puño con el pulgar todavía extendido. **Lo
+  determinante:** esos cuadros se procesaron cada ~30 ms, no cada ~143 ms, porque
+  venían justo después de un hueco de 853 ms (18:40:43,340 → 18:40:44,193) y la
+  Pi estaba poniéndose al día con cuadros acumulados. El estabilizador cuenta
+  **cuadros**, no tiempo: confirmó una forma de transición que en el reloj duró
+  ~0,22 s, cuando a ritmo nominal 5 cuadros cubren ~0,7 s. Un segundo después se
+  envía el `puño_cerrado` correcto (18:40:46,608).
+
+### c2) Liberaciones > 5 s (reps 3, 7 y 15) y el máximo de 4343 ms
+
+Salida literal:
+```
+=== (c2)Liberaciones: cuadros entre el último coincidente y la liberación; huecos > 286ms entre líneas Frame ===
+  [PEDIDA/MÁXIMO] QUITA previa rep 3: puño_cerrado último coincidente 18:40:38,664 -> liberado 18:40:43,007 = 4343ms | cuadros=16 (con mano 2, sin mano 14) | separación máx entre Frame=2463ms | huecos=1 (2463ms en huecos)
+      hueco desde 18:40:40,101: 2463ms sin cuadros
+  [PEDIDA] QUITA previa rep 7: palma_abierta último coincidente 18:41:13,030 -> liberado 18:41:15,332 = 2302ms | cuadros=16 (con mano 0, sin mano 16) | separación máx entre Frame=198ms | huecos=0 (0ms en huecos)
+  [PEDIDA] QUITA previa rep 15: dedo_pulgar último coincidente 18:42:16,473 -> liberado 18:42:18,780 = 2307ms | cuadros=16 (con mano 0, sin mano 16) | separación máx entre Frame=336ms | huecos=1 (336ms en huecos)
+      hueco desde 18:42:17,496: 336ms sin cuadros
+  Todas las liberaciones reproducidas: n=21, cuadros min=16 max=18, ms min=2195 max=4343
+```
+
+Desglose de la liberación desde la QUITA (el último cuadro coincidente se
+obtuvo con la misma herramienta):
+
+| Rep | QUITA → último cuadro con el gesto | Cuadros en ese tramo | Último coincidente → liberado | Causa |
+|---|---|---|---|---|
+| 3 | 1230 ms | 9, todos con el gesto | **4343 ms = 16 cuadros + 1 hueco de 2463 ms** | **Hueco sin cuadros.** Además es el máximo de 4343 ms |
+| 7 | 3592 ms | 25: 11 con el gesto y 13 sin mano, intercalados | 2302 ms = 16 cuadros, sin huecos | **Contador reiniciado:** cuadros sueltos de `palma_abierta` (confianza 0,74–0,79, 4 dedos) después de la QUITA. Cada cuadro coincidente pone el contador de fallos a 0 (`detector.py:142-145`) |
+| 15 | 3031 ms | 22, **todos** con el gesto | 2307 ms = 16 cuadros, hueco máximo 336 ms | **La mano siguió en cuadro** con el pulgar 3 s después de la QUITA. Es reacción humana, no el sistema |
+
+**Contador de cuadros vs hueco sin cuadros:** en las 21 liberaciones
+reproducidas, el contador fue siempre de **16 a 18 cuadros**. Solo la rep 3
+tuvo un hueco grande dentro del tramo de liberación. En la batería completa,
+la numeración de cuadros es continua (1118 cuadros, #2091 → #3208, 0
+perdidos) y hay **18 separaciones mayores de 286 ms** entre líneas `Frame`,
+incluidas una de **2463 ms** y otra de **853 ms**. Después del hueco grande
+llegaron 40 cuadros en 3,27 s (~12/s): se acumularon y se procesaron de golpe.
+**Desde el log no se puede saber dónde se acumularon** (cliente, túnel SSH o la
+propia Pi): el log solo marca cuándo se leyó cada cuadro, no cuándo se capturó.
+
+**Lo que esto significa para Fases 9/10** (sin cambios en esta fase): la
+liberación y la confirmación se cuentan en **cuadros**, no en tiempo. Por eso
+(1) un hueco sin cuadros alarga la liberación en todo lo que dure el hueco, y
+(2) una ráfaga de cuadros atrasados puede confirmar una forma de transición en
+mucho menos tiempo real del que suponen los 5 de 7 cuadros. Además, un único
+cuadro coincidente reinicia la cuenta de liberación (rep 7).
+
+### d) Corrección del dato de fps
+
+Corregido en el lugar (sección B de la preparación, resultados, "Datos de JD" y
+"Datos de diseño para Fases 9/10"):
+- El cliente permite **6 a 8 fps** (`CVA_ConfigSidebar.tsx`, líneas 141-143,
+  según JD; ese archivo no está en esta Pi). Entonces 16 cuadros son **2,0 a
+  2,7 s**, y 20 cuadros 2,5 a 3,3 s, **siempre que los cuadros lleguen al ritmo
+  nominal**. Se quitaron todas las menciones al valor anterior que quedaba fuera
+  de ese rango. El test de liberación ahora usa 125, 143 y 167 ms (8, 7 y 6 fps).
+- Además se corrigió algo que no estaba pedido pero era incorrecto: `fps_real`
+  del log es un **promedio acumulado** (`tcp_server.py:39-42`), y yo lo había
+  usado como prueba de un periodo uniforme de ≈143 ms. También estaba mal la
+  hipótesis de que el máximo de 4343 ms venía del umbral de 20 cuadros: fue un
+  hueco (c2).
+
+### Herramienta y tests
+- `benchmarks/fase_d_battery_detail.py` (nuevo, solo lee). Funciones puras:
+  `classify_battery_hits()`, `release_span_detail()`, `parse_frame_lines()`,
+  `frames_before()`.
+- 4 tests nuevos y 1 ajustado (los periodos del test de liberación).
+
+Salida literal de `pytest -q`:
+```
+........................................................................ [ 62%]
+............................................                             [100%]
+116 passed in 8.44s
+```

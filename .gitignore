@@ -47,6 +47,9 @@ logs/
 benchmarks/*.log
 benchmarks/*.log.*
 benchmarks/fase_d_frames_*/
+# Copias de solo lectura de las ventanas del log de producción de cada sesión de
+# Fase D (el log rota a medianoche y se borra a los 7 días -- ver BITACORA.md)
+benchmarks/fase_d_logs_*/
 
 # ── Segundo cerebro — Graphify/Obsidian (tooling de desarrollo local, nunca al repo) ──
 graphify-out/
