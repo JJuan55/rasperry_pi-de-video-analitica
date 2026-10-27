@@ -3637,3 +3637,94 @@ Salida literal de `pytest -q` (suite completa):
 .........................                                                [100%]
 169 passed in 24.14s
 ```
+
+## Diagnóstico de fluidez, exposición del puerto y herramientas fuera del repo (2026-10-23 a 2026-10-27)
+
+Trabajo de solo lectura sobre producción (sin reiniciar el servicio, sin cambiar
+niveles de log, sin sudo). Las herramientas viven en `~/soak/` de la Pi, **fuera del
+repositorio**, y se registran aquí para dejar constancia. Ninguna se importa desde el
+paquete.
+
+### Herramientas en `~/soak/` (43 pruebas unittest, con datos de muestra)
+| Archivo | Para qué |
+|---|---|
+| `soak_monitor.py` | Muestra cada N s (CSV): PID y reinicios del servicio, CPU/RSS/hilos/archivos del bridge, CPU y memoria del sistema, temperatura, frecuencia, throttling (vacío: el usuario no tiene acceso a `/dev/vcio`), Recv-Q/Send-Q/RTT/retransmisiones del 8766 con `ss`, y el costo del propio monitor |
+| `soak_summary.py` | Resumen del CSV: estadísticas, pendientes por regresión (`--descartar-min`), bloques de 10 min, top 5 de CPU, racha de Recv-Q > 0 |
+| `journal_frames.py` | fps y huecos por conexión a partir de una copia del journal (`-o short-iso-precise`), con aviso si hay líneas `Suppressed` de journald |
+| `recvq_probe.py` | Cada 50 ms lee `/proc/net/tcp` (sin lanzar procesos) y registra la `rx_queue` del socket del bridge (8766) |
+| `gaps_vs_recvq.py` | Cruza los huecos del journal con la sonda: "la Pi leyó tarde" (datos esperando en el socket) / "los datos no habían llegado" / "dudoso" / "sin muestras" |
+
+`recvq_probe.py` y `gaps_vs_recvq.py` **todavía no se ejecutaron contra producción**.
+
+### Ensayo de 60 s del monitor (2026-10-27, 14:02:05–14:03:05, cliente conectado)
+31/31 muestras, sin errores salvo el aviso esperado de `vcgencmd`. Costo del
+monitor: 0,1 % de CPU de promedio y 17,8 MB. Bridge a 7 fps: CPU 24,9 % de
+promedio (28,5 % máx) de un núcleo, RSS 227,5–227,6 MB, 11 archivos abiertos, 0
+reinicios, temperatura máx 56,8 °C, frecuencia 2000–2400 MHz, Recv-Q 0 en todas las
+muestras, 0 retransmisiones. Las pendientes de 60 s no son significativas. La
+prueba de 3 h sigue pendiente.
+
+### Hallazgos sobre la fluidez de los cuadros
+- **El registro no trae tiempos de proceso por cuadro.** `latencia_ms` es el tiempo
+  entre dos lecturas consecutivas y `fps_real` es un promedio acumulado. El "~35-65 ms"
+  de `main.py` es un comentario de una medición vieja.
+- **Después de un hueco llega una ráfaga.** En la sesión del 23/10 (10:55–11:01),
+  tras 65 de los 66 huecos de más de 500 ms, los 3 cuadros siguientes llegaron cada
+  ~37 ms (mediana), contra ~125 ms normales. Los cuadros se acumularon en algún punto
+  y la Pi los procesa con margen de sobra. **Dónde** se acumulan (cliente, túnel o
+  Pi) es lo que medirá `recvq_probe.py`. Línea de cierre de esa conexión:
+  `total_frames=2401, total_bytes=14227996`.
+- **Conexiones con cuadros desde el 19/10** (journal, solo lectura; 21 conexiones
+  aceptadas, 14 de ellas health checks sin cuadros, 0 líneas `Suppressed` visibles):
+
+```
+inicio              puerto   dur_s frames   fps huecos  h/min p95_ms max_ms
+2026-10-22 16:41:52  36704   891.8   6232  6.99     87    5.9    200   1192
+2026-10-22 17:27:58  34024   480.8   3356  6.98     32    4.0    214   1241
+2026-10-23 10:55:43  60756   343.6   2401  6.98    133   23.2    305   2321
+2026-10-23 14:14:32  44586  2802.8   9028  3.22   2913   62.4    985  19094
+2026-10-25 20:19:22  50834   104.3    731  7.00     41   23.6    291   2600
+2026-10-26 16:57:44  45984    48.5    341  7.01      2    2.5    213    419
+2026-10-27 14:00:34  54186   229.4   1569  6.84     25    6.5    201    737
+```
+  La sesión del **23/10 a las 14:14** fue muy degradada: 3,22 fps, 62 huecos por
+  minuto y un hueco de 19 s. Causa sin investigar.
+
+### Observaciones de seguridad (solo lectura, nada se cambió)
+- El servicio escucha en **`0.0.0.0:8766`** (`CVA_BRIDGE_HOST`, `config.py:6`) y
+  `nftables` está inactivo. Cualquier equipo de la red puede conectarse sin pasar por
+  SSH.
+- Las **231** conexiones registradas desde el 10/09 llegaron todas desde `127.0.0.1`.
+  El cliente pide el túnel hacia `127.0.0.1:8766` del servidor SSH (`bridge.rs`) y
+  las sesiones SSH entran por la Pi 4. Todo indica que el túnel termina en el sshd de
+  la Pi 5.
+- **Propuesta (sin aplicar):** `Environment=CVA_BRIDGE_HOST=127.0.0.1` en la unidad
+  del servicio y reiniciar. Requiere sudo y autorización de JD.
+  - Comprobar con `ss -tlnp` (debe salir `127.0.0.1:8766`), con
+    `nc -zv 127.0.0.1 8766`, con un intento desde otro equipo (debe ser rechazado) y
+    con una sesión real del cliente.
+  - Marcha atrás: quitar la línea y reiniciar.
+  - Pendiente confirmar en la Pi 4 que no reenvía el puerto por TCP directo.
+- El mensaje `cerrada sin datos (health check)` de `tcp_server.py:100-105` también
+  aparece cuando una sesión real cierra justo entre dos cuadros. Solo afecta al texto
+  del log.
+- `~/.ssh/authorized_keys`: 2 llaves ed25519 **sin opciones** (ni `command=`, ni
+  `restrict`, ni `permitopen`, ni `from=`). Si una es la del cliente,
+  `permitopen="127.0.0.1:8766"` la limitaría al bridge. Decisión de JD.
+
+### Modo real en la Etapa 2: recomendación
+Opción (b), proceso aparte que sigue las líneas `[diag]` del registro (ya existe como
+`robot_runner --seguir`): no toca producción, se para con `q` o una señal, y un fallo
+del actuador no afecta al bridge. La opción (a), integrarlo al bucle del bridge,
+queda para la Etapa 3 (armado desde el cliente).
+
+### Pendientes consolidados (esperan decisión o autorización de JD)
+- [ ] Revisión y aprobación de la Fase 11, Etapa 1 (rama `cva-robot-actuador`) antes
+  del PR.
+- [ ] Prueba de 3 h con `soak_monitor.py`.
+- [ ] Sesión con `recvq_probe.py` + `gaps_vs_recvq.py` para saber dónde se acumulan
+  los cuadros.
+- [ ] Investigar la sesión del 23/10 a las 14:14.
+- [ ] Cerrar `0.0.0.0:8766` y revisar las opciones de `authorized_keys`.
+- [ ] Conexión de parada abierta de antemano (bajaría el peor caso de PARAR).
+- [ ] `module_id` (CLAUDE.md §4.5).
