@@ -3847,3 +3847,29 @@ Salida literal de `pytest -q` (suite completa):
 ..........................                                               [100%]
 170 passed in 23.98s
 ```
+
+## Fase 11, Etapa 1 — estado tras el push (2026-10-27 17:33)
+
+Verificado solo con lecturas (`git ls-remote`, `git status` con `GIT_OPTIONAL_LOCKS=0`):
+
+- **Push hecho por JD:** `origin/cva-robot-actuador` = `3e00e9b`, igual que la rama
+  local (`## cva-robot-actuador...origin/cva-robot-actuador`, sin diferencias). La
+  rama quedó enlazada a su remoto.
+- **`main` sin cambios:** `origin/main` = `3064c7c`. No se abrió ni fusionó ningún PR.
+- **Producción intacta:** `rasperry_pi-de-video-analitica` sigue en `2b74314`; el
+  servicio está activo con el mismo PID (1469).
+- **Sin mediciones nuevas:** `recvq_probe.py` no se ha ejecutado contra producción y la
+  prueba de 3 h tampoco.
+
+### Esperando decisión o autorización de JD, por orden sugerido
+1. Revisión y aprobación de la Etapa 1. Después, PR `cva-robot-actuador` → `main`.
+2. Defecto del watchdog (`transport/watchdog.py`, no se vuelve a armar tras el primer
+   disparo): corregirlo ahora en una rama aparte con su prueba, o en la Fase 10.
+3. Sesión con `recvq_probe.py` + `gaps_vs_recvq.py` para saber dónde se acumulan los
+   cuadros.
+4. Prueba de 3 h con `soak_monitor.py`.
+5. Conexión de parada abierta de antemano (propuesta escrita en "Tarea 7", sin
+   implementar).
+6. Seguridad: cerrar `0.0.0.0:8766` (sudo + reinicio) y restringir las llaves SSH.
+7. Sin acceso desde aquí: journal del sistema del 23/10 de 14:14 a 15:01 y la
+   configuración de reenvío de la Pi 4.
