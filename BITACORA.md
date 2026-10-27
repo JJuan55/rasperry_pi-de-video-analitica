@@ -3410,3 +3410,111 @@ Salida literal de `pytest -q`:
 ............................................                             [100%]
 116 passed in 8.44s
 ```
+
+## Fase 11, Etapa 1 — actuador del robot EV3 en ENSAYO (2026-10-27, rama `cva-robot-actuador`)
+
+Worktree nuevo `~/video_analitica/cva-pi-repo-robot`, rama `cva-robot-actuador`,
+creada desde `origin/main` en `3064c7c` (PR #5). Para tenerla al día se hizo
+`git fetch`, que solo actualiza referencias: `origin/main` pasó de `993d0ea` a
+`3064c7c`. A la rama se le quitó el upstream (`git branch --unset-upstream`) para
+que un `git push` sin argumentos no pueda apuntar a `main`.
+
+**Sin contacto con el robot real, sin tocar producción.** No se tocó la detección,
+el estabilizador ni el contrato Pi->cliente: `main.py`, `detector.py` y
+`tcp_server.py` siguen sin cambios.
+
+### Tasklist
+- [x] A. Cliente del robot: configuración, topes duros, sostenimiento, PARAR con
+  cerrojo, armado por teclado, HTTP con la biblioteca estándar y modo ENSAYO por
+  defecto.
+- [x] B. Actuador simulado con retrasos, respuestas perdidas y caída total.
+- [x] C. Pruebas: 40 nuevas, más las 116 existentes, todo en verde.
+- [x] D. Propuestas, sin aplicar: cerrar la escucha en `0.0.0.0` y cómo correr el
+  modo real en la Etapa 2.
+- [ ] **Pendiente:** verificar el contrato real del servicio del robot. El archivo
+  `claude/CVA_robot-ev3_main_py_respaldo.md` no está en la Pi ni en ninguna rama del
+  repositorio.
+- [ ] **Pendiente, decisión de JD:** la regla de sostenimiento sobre el gesto
+  *confirmado* se cumple con muy poca mano real (ver "Hallazgo" abajo).
+
+### Archivos
+- `cva_gesture_bridge/actuators/robot_client.py`: configuración validada; topes
+  duros en el código (`HARD_MAX_DEGREES_PER_STEP=180`, `HARD_MAX_POWER=30` y un
+  piso `HARD_MIN_STEP_INTERVAL_S=1.0` para el mínimo configurable entre pasos);
+  `HoldTracker`; `DryRunTransport`/`HttpRobotTransport`; `OrderDispatcher` y
+  `RobotController` (estados DESARMADO/ARMADO/BLOQUEADO).
+- `cva_gesture_bridge/actuators/robot_runner.py`: proceso en primer plano con
+  teclas `a`/`d`/`p`/`q`. Lee los gestos confirmados del registro del bridge (solo
+  lectura): `--seguir` en vivo o `--reproducir` una copia (esta última solo en
+  ENSAYO).
+- `config/robot_actuador.json`: mapeo (palma=PARAR, puño=AVANZAR,
+  pulgar=GIRAR_DERECHA, meñique=GIRAR_IZQUIERDA), 90°, potencia 20, outC/outD,
+  3,0 s / 3,0 s / hueco 1,0 s, `min_confianza` 0,75 (el mismo valor que
+  `reference/config/robot.json`) y `robot_url: null`.
+- `tests/robot_sim.py`: actuador simulado (solo para pruebas).
+- `tests/test_robot_client.py`: 40 pruebas.
+
+### Decisiones
+- **PARAR** no exige sostenimiento ni confianza mínima (parar de más es seguro),
+  vale en cualquier estado y se envía una sola vez por aparición (sostener la palma
+  no repite la parada). Manda `/detener_ejecucion` y luego `/stop`, y deja el
+  estado BLOQUEADO.
+- **Una orden en vuelo:** un paso que llega con otro en vuelo se descarta, no se
+  encola. La parada tiene prioridad: anula el paso pendiente aún no enviado y, si
+  hay uno en vuelo, sale en cuanto ese responda o venza su timeout. El peor caso es
+  `timeout_http_s` + la parada. El estado queda BLOQUEADO al instante, sin esperar
+  a la red.
+- **Errores:** ante un timeout, una respuesta perdida, una conexión rechazada o un
+  código inesperado, el estado pasa a BLOQUEADO, se consulta `GET
+  /estado_ejecucion` y se manda la parada. El paso nunca se reenvía. Un 409 no se
+  reintenta y no bloquea.
+- **Conexión HTTP:** se reutiliza solo si se usó en los últimos 5 s. Así se evita
+  estrenar una orden con una conexión que el servidor ya cerró, lo que daría una
+  parada falsa.
+- **Al re-armar** hay que volver a sostener desde cero. El desarme por
+  inactividad (60 s sin armado ni paso) también manda la parada.
+- **Modo real:** exige `--real` Y `robot_url`, y hace `GET /status` al
+  arrancar; si falla, no arranca. Con URL pero sin `--real` sigue en ENSAYO.
+- **Contrato no verificado:** los nombres de campo del cuerpo de `/ejecutar_ruta`
+  (`gradosIzq`, `gradosDer`, `potencia`) son una suposición, aislada en
+  `build_route_payload()`.
+
+### Hallazgo: el sostenimiento del gesto *confirmado* no prueba que la mano siga ahí
+El gesto confirmado sigue vigente ~2,3–2,9 s después de que la mano se va: es la
+histéresis del estabilizador, 16 o 20 cuadros. Medido sobre las copias
+archivadas del 13/10 (batería, casos difíciles y repetición guiada):
+
+```
+periodos confirmados: 68; con >= 3,0 s confirmados (darían >=1 paso): 31
+de esos, con mano real (crudo==confirmado) < 3,0 s: 24
+  casos_dificiles  dedo_pulgar    confirmado  4.50 s | con evidencia cruda  0.14 s
+  casos_dificiles  dedo_pulgar    confirmado  3.56 s | con evidencia cruda  0.74 s
+  repeticion_guia  dedo_menique   confirmado  3.12 s | con evidencia cruda  0.85 s
+```
+
+Es decir, un paso puede salir con **~0,1–1 s de mano real**. La regla se dejó
+como se pidió (gesto confirmado). La alternativa recomendada es sumar solo los
+intervalos en los que el candidato crudo de **ambos** cuadros coincide con el
+confirmado. Requiere pasar también el gesto crudo al controlador (el registro
+`[diag]` ya lo trae). **Decisión de JD.**
+
+### Ensayo con datos reales (solo lectura, sin red)
+`robot_runner --reproducir --armar-al-inicio` sobre las copias del 13/10: 0
+líneas ilegibles en las tres. El primer `palma_abierta` bloquea, y desde ahí no
+sale ningún movimiento sin re-armar. Caso 5: ninguna orden. Los "paso descartado
+(orden en vuelo)" de la batería son un efecto de reproducir acelerado (miles de
+cuadros en milisegundos): no representan lo que pasaría en tiempo real.
+
+### Otras notas
+- `GESTOS.md` tiene un mapeo de robot "tentativo, solo propuesta" distinto del de
+  esta tarea (allí palma=avanzar y puño=detener). No se editó; queda a decisión de
+  JD actualizarlo.
+- El hueco de `module_id` (CLAUDE.md §4.5) sigue abierto. En la Etapa 1, armar
+  por teclado equivale a declarar que la sesión es de robot.
+
+Salida literal de `pytest -q` (suite completa, rama `cva-robot-actuador`):
+```
+........................................................................ [ 92%]
+............                                                             [100%]
+156 passed in 15.61s
+```

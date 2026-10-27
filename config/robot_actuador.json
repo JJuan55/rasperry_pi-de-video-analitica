@@ -1,0 +1,20 @@
+{
+  "mapeo": {
+    "palma_abierta": "PARAR",
+    "puño_cerrado": "AVANZAR",
+    "dedo_pulgar": "GIRAR_DERECHA",
+    "dedo_menique": "GIRAR_IZQUIERDA"
+  },
+  "min_confianza": 0.75,
+  "grados_paso": 90,
+  "potencia": 20,
+  "motor_izq": "outC",
+  "motor_der": "outD",
+  "sostener_inicio_s": 3.0,
+  "sostener_paso_s": 3.0,
+  "hueco_max_s": 1.0,
+  "min_entre_pasos_s": 3.0,
+  "desarme_inactividad_s": 60.0,
+  "timeout_http_s": 1.0,
+  "robot_url": null
+}
