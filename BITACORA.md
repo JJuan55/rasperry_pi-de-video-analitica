@@ -3873,3 +3873,35 @@ Verificado solo con lecturas (`git ls-remote`, `git status` con `GIT_OPTIONAL_LO
 6. Seguridad: cerrar `0.0.0.0:8766` (sudo + reinicio) y restringir las llaves SSH.
 7. Sin acceso desde aquí: journal del sistema del 23/10 de 14:14 a 15:01 y la
    configuración de reenvío de la Pi 4.
+
+## Fase 11, Etapa 1 — preparación del ensayo en vivo (2026-10-27, Tarea 9)
+
+Solo ENSAYO (nunca `--real`). Nada se conectó al robot. Producción intacta; el
+registro del bridge solo se leyó.
+
+- **Registro que sigue el runner:**
+  `/home/david_cardenas/video_analitica/rasperry_pi-de-video-analitica/logs/cva_gesture_bridge.log`.
+  Es el descriptor 4 del servicio (PID 1469), dueño `david_cardenas`, permisos 644,
+  legible. Nivel INFO (`CVA_LOG_LEVEL=INFO` en la unidad; las líneas `[diag]` salen en
+  INFO).
+- **Lanzador fuera del repositorio:** `~/robot_ensayos/iniciar_ensayo.sh`. Crea la
+  sesión tmux `robot_ensayo` y corre el runner con `--seguir`, sin `--real`, y con
+  `tee -i` a un archivo nuevo `~/robot_ensayos/ensayo_<fecha_hora>.log`. `-i` evita que
+  Ctrl+C mate a `tee` antes de que se registre el PARAR.
+- **Prueba en seco sin cliente (18:20):**
+  - `a` arma; `d` desarma con PARAR; `p` hace PARAR y deja BLOQUEADO; `q` sale con
+    PARAR.
+  - Ctrl+C (SIGINT) y SIGTERM salen con "Señal …: PARAR y salida", parada
+    confirmada y código 0.
+  - El runner no abrió ninguna conexión TCP.
+  - Los tres archivos de salida conservan las líneas finales.
+- **Configuración local para el modo real (sin usar):** `~/robot_actuador.local.json`,
+  copia idéntica a la del repositorio, con `robot_url: null`, permisos 600. El cargador
+  la acepta y el modo real la rechaza como corresponde ("modo real sin 'robot_url'").
+- **Hallazgo:** `~` es un repositorio git vacío (rama `master` sin commits, sin remoto,
+  nada rastreado, creado el 3/09). La configuración local queda dentro de ese árbol,
+  sin rastrear. Riesgo si alguien hace `git add -A` en `~`. Decisión de JD.
+- **Propuestas sin implementar (esperan visto bueno):** (1) una línea de estado cada
+  30 s con los cuadros leídos, la hora del último cuadro, las líneas ilegibles y el
+  estado; (2) en ENSAYO, que el registro de órdenes diga "no enviada (ENSAYO)" en vez
+  de "enviada … -> 200".
