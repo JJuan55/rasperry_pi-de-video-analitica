@@ -106,7 +106,6 @@ async def test_log_message_unchanged_on_each_firing(caplog):
     assert msgs == ["Watchdog: sin frames en 0.1s, dejando de emitir instrucciones"] * 2
 
 
-
 async def test_a_start_twice_leaves_a_single_timer_and_fires_once():
     calls, cb = _counter()
     wd = Watchdog(TIMEOUT, cb)
@@ -157,6 +156,7 @@ async def test_c_feed_from_inside_on_timeout_rearms_and_fires_again_each_timeout
     n = len(calls)
     await asyncio.sleep(SILENCE)
     assert len(calls) == n            # stop() lo corta
+
 
 async def test_connection_with_long_gap_in_the_middle_is_watched_again():
     """Parte C: tcp_server.py arranca el watchdog por conexión, lo alimenta en cada
