@@ -3518,3 +3518,122 @@ Salida literal de `pytest -q` (suite completa, rama `cva-robot-actuador`):
 ............                                                             [100%]
 156 passed in 15.61s
 ```
+
+## Fase 11, Etapa 1 — correcciones de la revisión (2026-10-27, misma rama)
+
+JD corrigió dos cosas de su propio pedido anterior: (1) el contrato del robot no estaba
+disponible y ahora está en `docs/CONTRATO_ROBOT_EV3.md`; (2) el diseño aprobado
+(2026-10-23) suma tiempo con el gesto **crudo** del cuadro actual, no con el
+confirmado. Sin contacto con el robot, sin tocar producción, sin push.
+
+### Tasklist
+- [x] Contrato real: cuerpo `{"pasos":[...]}`, `totalPasos` exigido, 409, `/status`
+  con outC y outD conectados. Simulador y pruebas con los cuerpos exactos.
+- [x] A. Sostenimiento con evidencia cruda: 3 de los últimos 4 cuadros, configurable,
+  más la regla de huecos. Medido sobre las copias del 13/10.
+- [x] B. PARAR en su propio hilo y por una conexión nueva, con estado PARANDO y
+  vigilancia de `/estado_ejecucion`, alarma y sin reanudar nunca solo.
+- [x] C. `totalPasos`, comprobación de motores en modo real, y PARAR antes de salir
+  con SIGINT, SIGTERM o SIGHUP.
+- [x] D. Base de tiempo de `--seguir` = la hora de la línea del registro.
+- [x] E. `GESTOS.md`: mapeo v1 vigente; retroceder queda fuera de la v1.
+- [x] F. `docs/CONTRATO_ROBOT_EV3.md`, sin direcciones ni credenciales.
+
+### A. Sostenimiento: medición sobre las copias del 13/10
+Se tomaron las copias archivadas de la batería, los casos difíciles y la
+repetición guiada. Se reprodujeron con el `HoldTracker` nuevo (3 de 4, hueco
+< 1,0 s) y con la regla vieja (confirmado). "Mano real" = intervalos entre dos
+cuadros con el crudo igual al gesto en ambos, confianza ≥ 0,75 y separación < 1 s.
+
+```
+=== SOLO gestos de movimiento (puño, pulgar, meñique) ===
+periodos confirmados: 47
+regla VIEJA (confirmado): pasos 57; pasos con < 3,0 s de mano real acumulada en el periodo al dar el paso: 16
+    casos_dificiles  dedo_pulgar    mano real 0.40 s (periodo 8.58 s)
+    casos_dificiles  dedo_pulgar    mano real 0.74 s (periodo 3.44 s)
+    repeticion_guia  dedo_menique   mano real 0.85 s (periodo 3.01 s)
+regla NUEVA (crudo 3 de 4): pasos 37; pasos con < 3,0 s de mano real acumulada en el periodo al dar el paso: 0
+periodos con >= 3,0 s SEGUIDOS de mano real (paso legítimo): 5; sin paso con la regla nueva: 0
+caso dedo_pulgar: periodo 4.47 s, mano real 0.14 s -> pasos regla vieja 0, regla nueva 0
+```
+
+Con los 4 gestos tratados como si todos movieran: regla vieja, 87 pasos, 25 con
+menos de 3 s; regla nueva, 46 pasos, **0** con menos de 3 s; 7 legítimos, ninguno
+perdido.
+
+**Corrección de lo que escribí en la sección anterior.** El caso
+`dedo_pulgar` de "4,5 s con 0,14 s de mano real" **no habría dado un paso con
+ninguna de las dos reglas**. Ese periodo (18:48:05,789 → 18:48:10,258) tuvo solo
+11 cuadros y tres huecos de 1,1 a 1,8 s, que reinician la cuenta en las dos reglas.
+En la Tarea 5 lo conté como "daría un paso" solo por durar más de 3 s, sin simular
+la regla: el ejemplo estaba mal elegido. La conclusión se mantiene con los casos
+simulados: la regla vieja da 16 pasos reales con menos de 3 s de mano (el peor con
+0,40 s) y la nueva, 0.
+
+**Detalle de la regla nueva.** El confirmado solo elige el objetivo e inicia la
+cuenta. En frío, la ventana necesita 3 cuadros crudos antes de sumar (en sesión
+real ya está llena al confirmar, porque confirmar exige 5 de 7 crudos). Con la
+tolerancia de 1 de 4, al irse la mano se suma como mucho 1 intervalo después del
+último cuadro bueno.
+
+### B. PARAR: diseño y peor caso
+- **Al instante, sin red:** el estado pasa a PARANDO y la cola de rutas queda
+  bloqueada (`RouteDispatcher.block()`): ninguna ruta nueva sale hasta re-armar.
+- **Hilo propio** (`robot-parada`) con una **conexión nueva** (`transport_factory()`):
+  `POST /detener_ejecucion` y luego `POST /stop`. No espera al paso en vuelo ni a
+  su respuesta.
+- **Vigilancia:** cada `sondeo_parada_s` (0,3 s) hace `GET /estado_ejecucion`. Con
+  `ejecutando:true`, vuelve a parar (detener + stop). Sin respuesta legible, repite
+  `/detener_ejecucion`.
+- **Termina solo cuando:** no hay ruta en vuelo (respondió o venció su plazo), han
+  pasado `margen_parada_s` (6 s) desde el último envío de ruta y hubo **dos**
+  lecturas seguidas con `ejecutando:false`. Entonces el estado pasa a BLOQUEADO (o a
+  DESARMADO si fue un desarme).
+- **Sin confirmación** después de `alarma_parada_s` (10 s): log ERROR "PARADA NO
+  CONFIRMADA", repetido cada 5 s, y sigue reintentando. No se puede re-armar
+  mientras esté en PARANDO, y nunca reanuda solo.
+- **Un segundo PARAR** durante PARANDO no crea otro hilo.
+- **Peor caso hasta que llega la primera orden de parada:** es independiente del
+  paso en vuelo. Con conexión nueva hay que contar el saludo TCP: ≈ 1 ida y vuelta +
+  1 ida. Con el ping medido por JD (13–337 ms de ida y vuelta) da ≈ 20–510 ms. Con
+  una conexión de parada ya abierta de antemano bajaría a ≈ 1 ida (≈ 7–170 ms); se
+  deja como posible mejora.
+- **Movimiento extra máximo** si la orden de ruta se perdió o llegó tarde y anuló el
+  detener: **un paso** (90° configurados, nunca más de 180° por el tope duro). La
+  vigilancia lo detecta (`ejecutando:true`) y lo vuelve a parar.
+
+### C. Verificaciones
+- `route_response_ok()` exige `ok:true` y `totalPasos` == pasos enviados. Si no, es
+  un fallo y dispara PARAR.
+- En modo real, el runner hace `GET /status` y exige outC y outD con
+  `connected:true`. Si no, no arranca (código 3) y no manda nada más.
+- El runner ejecuta PARAR antes de salir con SIGINT (Ctrl+C), SIGTERM y SIGHUP. Si
+  no logra confirmarlo en `--espera-parada-s` (10 s), sale con código 4 y ERROR.
+
+### D. Base de tiempo
+En `--seguir` y en `--reproducir`, la hora de cada cuadro es la de su línea
+`[diag]`. Esa línea se escribe cuando el bridge **terminó de procesar** el cuadro
+(lectura + inferencia, ~35–65 ms después de leerlo); la hora exacta de lectura no
+se registra. No es la hora a la que el runner lee la línea: el sondeo del archivo
+(~50 ms) no altera los intervalos. El desarme por inactividad usa `time.time()`, el
+mismo reloj de pared con que el bridge escribe sus horas. Con `--reproducir`, las
+rutas se envían en línea (sin hilo) para que el ensayo sea determinista.
+
+### Archivos de esta revisión
+- `cva_gesture_bridge/actuators/robot_client.py`: reescrito (contrato, HoldTracker
+  con crudo, RouteDispatcher, StopSupervisor, estado PARANDO).
+- `cva_gesture_bridge/actuators/robot_runner.py`: crudo por cuadro, hora del
+  registro, SIGHUP, comprobación de motores.
+- `config/robot_actuador.json`: claves nuevas `ventana_crudo`,
+  `coincidencias_crudo`, `margen_parada_s`, `sondeo_parada_s` y `alarma_parada_s`.
+- `tests/robot_sim.py`: cuerpos exactos, `detener.clear()`, retrasos antes y después
+  de aplicar, rutas que no responden y motores configurables.
+- `tests/test_robot_client.py`: 53 pruebas, estables en 8 corridas seguidas.
+- `docs/CONTRATO_ROBOT_EV3.md` (nuevo) y `GESTOS.md` (solo texto).
+
+Salida literal de `pytest -q` (suite completa):
+```
+........................................................................ [ 85%]
+.........................                                                [100%]
+169 passed in 24.14s
+```

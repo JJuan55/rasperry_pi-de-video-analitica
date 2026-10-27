@@ -51,19 +51,25 @@ instrucción:
 | `dedo_anular` | Solo el anular extendido (**ya probado y fijo** — ver arriba) |
 | `dedo_menique` | Solo el meñique extendido |
 
-## Mapeo tentativo por módulo (solo propuesta, no implementado)
+## Mapeo por módulo (Robot: v1 vigente; Domótica: todavía tentativo)
 
-### Robot (Eve3 — movimiento)
+### Robot (Eve3 — movimiento) — mapeo v1 VIGENTE
 
-| Gesto | Instrucción tentativa |
+Aprobado por JD (2026-10-23) e implementado en la rama `cva-robot-actuador`
+(`config/robot_actuador.json`, Fase 11 Etapa 1, solo ENSAYO por ahora). Reemplaza la
+propuesta tentativa anterior de esta sección.
+
+| Gesto | Instrucción v1 |
 |---|---|
-| `palma_abierta` | avanzar |
-| `puño_cerrado` | detener |
-| `dedo_indice` | girar izquierda |
-| `dedo_anular` | mover adelante (fijo, ya probado) |
-| `dedo_menique` | retroceder |
+| `palma_abierta` | parar (inmediato, sin sostenimiento) |
+| `puño_cerrado` | avanzar |
+| `dedo_pulgar` | girar derecha |
+| `dedo_menique` | girar izquierda |
 
-### Domótica (Arduino)
+Retroceder queda **fuera de la v1**. Los movimientos se ejecutan de a un paso por cada
+3,0 s sostenidos (ver BITACORA.md, "Fase 11, Etapa 1").
+
+### Domótica (Arduino) — tentativo, solo propuesta, no implementado
 
 | Gesto | Instrucción tentativa |
 |---|---|
@@ -76,7 +82,7 @@ instrucción:
 
 ## Pendiente de resolver antes de que esto sea definitivo
 
-- Confirmar o ajustar el resto del mapeo tentativo de ambos módulos.
+- Confirmar o ajustar el mapeo tentativo de Domótica (el de Robot ya es la v1 vigente).
 - Decidir qué pasa con los gestos "sin asignar" en Domótica — ¿se dejan sin instrucción
   (ignorados) o se completan con más acciones del módulo (ventilador, alarma, etc.)?
 - Resolver el hueco de `module_id` (`CLAUDE.md` sección 4.5) — el bridge todavía no sabe

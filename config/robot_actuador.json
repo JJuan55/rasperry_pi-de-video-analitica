@@ -13,8 +13,13 @@
   "sostener_inicio_s": 3.0,
   "sostener_paso_s": 3.0,
   "hueco_max_s": 1.0,
+  "ventana_crudo": 4,
+  "coincidencias_crudo": 3,
   "min_entre_pasos_s": 3.0,
   "desarme_inactividad_s": 60.0,
   "timeout_http_s": 1.0,
+  "margen_parada_s": 6.0,
+  "sondeo_parada_s": 0.3,
+  "alarma_parada_s": 10.0,
   "robot_url": null
 }
