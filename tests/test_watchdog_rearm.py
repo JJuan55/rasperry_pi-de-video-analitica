@@ -106,6 +106,58 @@ async def test_log_message_unchanged_on_each_firing(caplog):
     assert msgs == ["Watchdog: sin frames en 0.1s, dejando de emitir instrucciones"] * 2
 
 
+
+async def test_a_start_twice_leaves_a_single_timer_and_fires_once():
+    calls, cb = _counter()
+    wd = Watchdog(TIMEOUT, cb)
+    wd.start()
+    first = wd._handle
+    wd.start()
+    assert first.cancelled()          # el segundo start() reemplaza el temporizador
+    assert wd._handle is not first
+    await asyncio.sleep(SILENCE)
+    assert len(calls) == 1
+    wd.stop()
+
+
+async def test_b_start_after_stop_arms_again_and_fires_once():
+    calls, cb = _counter()
+    wd = Watchdog(TIMEOUT, cb)
+    wd.start()
+    wd.stop()
+    wd.start()
+    await asyncio.sleep(SILENCE)
+    assert len(calls) == 1
+    assert wd.tripped
+    wd.stop()
+
+
+async def test_c_feed_from_inside_on_timeout_rearms_and_fires_again_each_timeout():
+    """Con asyncio (un solo hilo), un feed() "mientras on_timeout no terminó" solo
+    puede venir del propio on_timeout. Con este arreglo ese feed() cuenta como un
+    feed() posterior al disparo: re-arma y pone tripped=False antes de que el callback
+    termine, y si el callback alimenta en cada disparo, dispara en cada timeout. En el
+    código original ese feed() no hacía nada. Hoy ningún llamador lo hace
+    (main._on_watchdog_timeout solo registra un aviso; tcp_server alimenta desde el
+    bucle, nunca dentro del callback). Esta prueba fija el comportamiento."""
+    calls, seen = [], {}
+
+    def on_timeout():
+        calls.append(1)
+        seen["tripped_dentro"] = wd.tripped
+        wd.feed()
+        seen["tripped_tras_feed"] = wd.tripped
+
+    wd = Watchdog(TIMEOUT, on_timeout)
+    wd.start()
+    await asyncio.sleep(SILENCE)
+    assert seen == {"tripped_dentro": True, "tripped_tras_feed": False}
+    assert len(calls) >= 2            # cada disparo re-arma: vuelve a disparar
+    wd.stop()
+    n = len(calls)
+    await asyncio.sleep(SILENCE)
+    assert len(calls) == n            # stop() lo corta
+
 async def test_connection_with_long_gap_in_the_middle_is_watched_again():
     """Parte C: tcp_server.py arranca el watchdog por conexión, lo alimenta en cada
     cuadro y lo detiene al cerrar. Una conexión con un hueco largo en medio tiene que

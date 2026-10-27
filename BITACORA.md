@@ -3453,3 +3453,15 @@ misma conexión, en lugar de uno solo. Hoy `_on_watchdog_timeout` solo registra 
 
 **Pendiente:** revisión de JD del diff; push, PR y reinicio, cada uno solo con su
 autorización.
+
+**Revisión de JD (mismo día).** Se agregaron 3 pruebas (11 en total; suite: 127):
+(a) `start()` dos veces deja un solo temporizador y dispara una vez; (b) `start()`
+después de `stop()` vuelve a armarlo y dispara una vez; (c) un `feed()` llamado desde
+DENTRO de `on_timeout` (con asyncio, la única forma de que ocurra "mientras on_timeout
+no terminó") re-arma el watchdog y pone `tripped=False` antes de que el callback
+termine; si el callback alimenta en cada disparo, dispara en cada timeout. **Es un
+cambio respecto del original**, donde ese `feed()` no hacía nada (medido: 1 disparo y
+`tripped` seguía en True). Cumple la regla "un feed() posterior con el watchdog
+iniciado lo re-arma", pero hoy ningún llamador lo hace (`main._on_watchdog_timeout`
+solo registra un aviso). Decisión de JD si se prefiere ignorar ese `feed()`
+reentrante.
