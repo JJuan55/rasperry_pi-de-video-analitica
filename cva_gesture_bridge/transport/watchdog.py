@@ -17,17 +17,22 @@ class Watchdog:
         self._on_timeout = on_timeout
         self._handle: Optional[asyncio.TimerHandle] = None
         self._tripped = False
+        # "Iniciado" explícito (no el valor de _handle): tras un disparo _handle queda en
+        # None pero el watchdog sigue iniciado, y el siguiente feed() lo debe re-armar.
+        self._started = False
 
     def start(self) -> None:
+        self._started = True
         self._tripped = False
         self._reschedule()
 
     def feed(self) -> None:
-        if self._handle is not None:
+        if self._started:
             self._tripped = False
             self._reschedule()
 
     def stop(self) -> None:
+        self._started = False
         if self._handle is not None:
             self._handle.cancel()
             self._handle = None

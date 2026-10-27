@@ -3410,3 +3410,46 @@ Salida literal de `pytest -q`:
 ............................................                             [100%]
 116 passed in 8.44s
 ```
+
+## Arreglo del watchdog: re-armado tras el primer disparo (2026-10-27, rama `fix-watchdog-rearm`)
+
+Rama nueva desde `origin/main` (`3064c7c`), en el worktree
+`~/video_analitica/cva-pi-repo-watchdog`, sin upstream. Producción no se tocó: sin
+pull, sin checkout, sin reinicio, sin sudo.
+
+**Qué y por qué.** En `transport/watchdog.py`, `_fire()` dejaba `self._handle = None`
+y `feed()` solo reprogramaba si `_handle` no era None. Después del primer disparo, el
+watchdog no se volvía a armar en esa conexión. Así se vio en producción el 23/10
+(conexión `44586`, 14:14–15:01): cinco huecos de más de 5 s y un único aviso, a las
+14:35:11. Ver "Fase 11, Etapa 1 — revisión de JD, Tarea 7", D.
+
+**Arreglo mínimo.** Una bandera explícita `_started`: `start()` la pone en True y
+`stop()` en False; `feed()` re-arma solo si está en True. Ya no depende de `_handle`.
+`_fire()` no cambia: dispara una vez y no se repite mientras siga el silencio. No
+cambian la firma pública, el mensaje de log ni la forma en que lo usan
+`tcp_server.py` y `main.py`.
+
+**Cómo se probó.** `tests/test_watchdog_rearm.py` (nuevo, 8 pruebas, timeout 0,05 s):
+(i) dispara una vez; (ii) `feed()` tras el disparo re-arma y un segundo silencio
+dispara de nuevo; (iii) sin `feed()` no se repite; (iv) `feed()` antes de `start()` no
+arma; (v) `feed()` después de `stop()` no arma; (vi) `tripped` pasa a True al disparar y
+a False con el siguiente `feed()`; el mensaje de log es el mismo en cada disparo; y una
+conexión real de `TcpServer` con un hueco largo en medio vuelve a quedar vigilada (y
+deja de estarlo al cerrarse). **Con el código anterior fallaban 4 de las 8** ((ii),
+(vi), la del mensaje y la de la conexión); con el arreglo pasan las 8, estables en 5
+corridas. Las 4 pruebas que ya había en `tests/test_watchdog.py` pasan sin
+modificarlas. Suite completa:
+```
+........................................................................ [ 58%]
+....................................................                     [100%]
+124 passed in 10.93s
+```
+
+**Entra en vigor solo cuando se reinicie el servicio** desde un `main` que incluya este
+cambio. Hasta entonces, producción (`2b74314`) sigue con el comportamiento anterior.
+Efecto esperado: un aviso del watchdog por cada silencio de 5 s o más dentro de una
+misma conexión, en lugar de uno solo. Hoy `_on_watchdog_timeout` solo registra un aviso
+("sin actuadores que cortar todavía"), así que no cambia nada más del comportamiento.
+
+**Pendiente:** revisión de JD del diff; push, PR y reinicio, cada uno solo con su
+autorización.
