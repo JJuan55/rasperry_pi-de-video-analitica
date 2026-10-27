@@ -3728,3 +3728,122 @@ queda para la Etapa 3 (armado desde el cliente).
 - [ ] Cerrar `0.0.0.0:8766` y revisar las opciones de `authorized_keys`.
 - [ ] Conexión de parada abierta de antemano (bajaría el peor caso de PARAR).
 - [ ] `module_id` (CLAUDE.md §4.5).
+
+## Fase 11, Etapa 1 — revisión de JD, Tarea 7 (2026-10-27, misma rama)
+
+Sin robot real, sin tocar producción, sin push.
+
+### B. Qué prueba cubre cada caso (`tests/test_robot_client.py`)
+| Caso | Prueba(s) |
+|---|---|
+| (i) `totalPasos` distinto del enviado | `ContractTests::test_route_response_requires_ok_and_exact_total`, `RouteWithSimulatorTests::test_total_pasos_mismatch_is_failure_and_parar` |
+| (ii) 409 sin reintento | `RouteWithSimulatorTests::test_409_is_not_retried` |
+| (iii) la ruta llega DESPUÉS del PARAR | `StopWithSimulatorTests::test_ii_route_applied_after_parar_is_detected_and_stopped_again` |
+| (iv) PARAR con el robot caído | `StopWithSimulatorTests::test_robot_down_alarm_and_stays_parando` (caída total) y `test_iii_robot_not_answering_parar_keeps_retrying_with_alarm_never_resumes` (no responde a la parada) |
+| (v) SIGTERM / SIGHUP (y Ctrl+C) | `RunnerTests::test_sigterm_runs_parar_before_exit`, `test_sighup_runs_parar_before_exit`, `test_ctrl_c_runs_parar_before_exit` |
+| (vi) configuración que rebasa 180° / 30 / 1 s | `ConfigTests::test_hard_limits_cannot_be_raised_from_config` (181°, potencia 31 y 40, 0,5 s entre pasos; 180/30/1,0 justo en el tope son válidos); además `ContractTests::test_hard_limits_in_code` (configuración alterada después de validar) |
+| (vii) 3 de 4 con hueco de 0,9 s (no reinicia) y 1,1 s (reinicia) | **Nueva en esta revisión:** `HoldTrackerTests::test_three_of_four_with_gap_0_9_keeps_and_gap_1_1_resets`. Antes solo había 0,9 s y 1,0 s (`test_gaps`) |
+
+Suite: **170 pruebas** (116 + 54).
+
+### C. Propuesta, sin implementar: conexión de parada abierta de antemano
+**Objetivo:** que la primera orden de parada no pague el saludo TCP. El servidor del
+robot usa HTTP/1.1 persistente y atiende cada conexión en su propio hilo.
+
+1. **Canal de parada dedicado** (`StopChannel`), separado de la conexión de rutas.
+   - Se abre al arrancar en modo real y se exige sano para **armar**: si no se puede
+     abrir, no se arma. Así se falla cerrado.
+   - Solo transporta `GET` de latido y las órdenes de parada (`/detener_ejecucion`,
+     `/stop`), nunca rutas.
+2. **Latido barato:** cada `latido_s` (propuesta: 2 s), `GET /estado_ejecucion` por ese
+   canal.
+   - Es estado en memoria del servidor; `/status` lee motores y batería, así que es
+     más caro. Usaría `/status` solo si `/estado_ejecucion` no sirviera.
+   - Si el latido falla o vence su plazo (propuesta: 0,5 s), el canal queda "muerto"
+     y se reabre en segundo plano, con espera creciente entre intentos.
+   - Si estando ARMADO el canal sigue muerto más de `canal_muerto_max_s` (propuesta:
+     5 s), se desarma con PARAR por conexión nueva.
+   - El latido corre bajo un candado del canal, pero **PARAR nunca espera ese candado**
+     (ver 3).
+   - **Pendiente:** el plazo de inactividad keep-alive del servidor del robot. El
+     latido debe ser más frecuente que ese plazo.
+3. **PARAR con canal preabierto, en carrera y sin retraso:**
+   - (a) Si el canal está sano y libre, `POST /detener_ejecucion` por él.
+   - (b) **Al mismo tiempo**, en otro hilo, abre una conexión nueva y manda también
+     `/detener_ejecucion` (idempotente: dos paradas no hacen daño).
+   - Lo que llegue primero detiene el robot. Si la preabierta falló (reset, tubería
+     rota, conexión medio abierta que nadie detectó, o un latido en vuelo), la nueva ya
+     iba en camino: nada espera a nada.
+   - Después sigue la vigilancia actual del `StopSupervisor`, sin cambios (estado,
+     margen de 6 s, dos lecturas con `ejecutando:false`).
+4. **Cuánto baja el peor caso de la primera orden:** hoy es ≈ 1 ida y vuelta (saludo
+   TCP) + 1 ida = ≈ 1,5 RTT, es decir, ≈ 20–505 ms con un ping de 13–337 ms. Con el
+   canal sano: ≈ 1 ida = ≈ 7–170 ms (suponiendo ida ≈ vuelta). Baja ≈ 1 RTT (13–337 ms).
+   Con el canal muerto sin detectar, la carrera deja el caso igual que hoy, nunca
+   peor.
+5. **Costo:** una conexión TCP y un hilo más en el servidor del robot mientras el
+   actuador corre, más un `GET` cada 2 s. **Pendiente:** confirmar que el EV3 lo
+   tolera.
+6. **Pruebas que añadiría** (simulador con keep-alive y conteo de conexiones):
+   - PARAR con el canal sano no abre conexión TCP nueva antes del primer `detener`, y
+     el `detener` llega antes que por la vía nueva.
+   - El simulador cierra conexiones inactivas: el latido lo detecta y se reconecta.
+   - Conexión medio abierta (el simulador deja de responder por el canal sin
+     cerrarlo): PARAR llega igual por la conexión nueva, sin esperar el plazo del canal.
+   - Un latido en vuelo no retrasa a PARAR.
+   - Sin canal no se arma; con el canal muerto más de `canal_muerto_max_s` se desarma.
+   - Por el canal de parada solo pasan `GET` de latido y órdenes de parada (nunca
+     `/ejecutar_ruta`).
+   - PARAR repetido no multiplica hilos ni conexiones.
+
+### D. Sesión del 23/10, de 14:14:32 a 15:01:15 (journal, solo lectura)
+Conexión `44586`: 9028 cuadros en 2802,8 s. Bloques de 5 min:
+
+```
+bloque (5 min)         cuadros   fps huecos  >=1s s_en_huecos  max_ms
+14:14:32                  1362  4.54    287     5       137.7    2657
+14:19:32                  1081  3.60    418    14       217.5    1850
+14:24:32                   599  2.00    335    88       263.9    1809
+14:29:32                   345  1.15    340   101       299.9    2011
+14:34:32                  1125  3.75    181    68       224.4   19094
+14:39:32                  1649  5.50    193    20       152.2   18192
+14:44:32                   693  2.31    515     9       265.0    1438
+14:49:32                   403  1.34    363    73       297.0    8504
+14:54:32                  1145  3.82    231    56       180.5    2272
+14:59:32                   625  6.08     50     5        33.9    8817
+10 huecos mayores: 14:37:38,647 19.1s, 14:39:53,713 18.2s, 14:40:59,111 14.7s, 14:35:06,663 13.8s, 14:38:57,085 13.2s, 14:59:47,152 8.8s, 14:53:22,576 8.5s, 14:41:20,320 8.1s, 14:51:58,510 6.5s, 14:39:10,279 5.8s
+```
+- **Distribución:** por **rachas**, ni constante ni empeorando de forma continua. Hay
+  dos valles (1,15 fps a las 14:29 y 1,34 fps a las 14:49) con recuperaciones entre
+  medio (5,50 fps a las 14:39). Los cinco huecos de 13 a 19 s se concentran entre las
+  14:35 y las 14:41.
+- **Tamaño medio de cuadro por bloque:** 10093, 11041, 8016, 3111, 3062, 3461, 10583,
+  11844, 12301 y 11949 bytes. No acompaña a los huecos: el bloque con menos fps tuvo
+  los cuadros más pequeños.
+- **Otras líneas del servicio en ese rato:** 2 health checks (14:14:31), la conexión
+  (14:14:32), **un único** aviso del watchdog (14:35:11,630, "sin frames en 5.0s") y el
+  cierre (15:01:21,836, `total_frames=9028, total_bytes=74380751`). No hubo errores,
+  reinicios del modelo ni otras desconexiones. `NRestarts=0`.
+- **Defecto encontrado, con dato y código (no se corrigió):** en esa conexión hubo
+  cinco huecos de más de 5 s, pero el watchdog se disparó una sola vez. En
+  `cva_gesture_bridge/transport/watchdog.py` (igual en producción y en `origin/main`),
+  `feed()` solo reprograma si `self._handle is not None`, y `_fire()` deja
+  `self._handle = None`: **después del primer disparo el watchdog no se vuelve a armar
+  en esa conexión.** Importa para los fail-safes de la Fase 10. El actuador del robot
+  no depende de él: tiene su propia regla de huecos y su desarme por inactividad.
+- **Journal del sistema (térmico, memoria, Wi-Fi):** **sin permiso sin sudo.**
+  `journalctl` sin `-u` solo muestra las líneas del servicio, `journalctl -k` sale
+  vacío, `dmesg` responde "Operación no permitida" y `system.journal` es de
+  `root:systemd-journal`. **Pendiente.**
+
+### E. Línea "finalizada" de la conexión principal del 23/10 10:55
+Está en el journal:
+`2026-10-23 11:01:27,617 INFO cva_gesture_bridge.transport.tcp_server: Conexión con ('127.0.0.1', 60756) finalizada. total_frames=2401, total_bytes=14227996`
+
+Salida literal de `pytest -q` (suite completa):
+```
+........................................................................ [ 42%]
+........................................................................ [ 84%]
+..........................                                               [100%]
+170 passed in 23.98s
+```

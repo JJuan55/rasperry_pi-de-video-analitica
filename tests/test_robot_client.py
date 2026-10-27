@@ -236,6 +236,18 @@ class HoldTrackerTests(unittest.TestCase):
         b = hold("puño_cerrado", a[-1].t + 1.2, 2.0)
         self.assertEqual(len(self._steps(a + b, max_gap=1.5)), 1)
 
+    def test_three_of_four_with_gap_0_9_keeps_and_gap_1_1_resets(self):
+        # 2,0 s con un cuadro suelto sin crudo (3 de 4 se cumple), luego un hueco y 1,5 s más.
+        def tramo(t0, seconds):
+            n = int(round(seconds / 0.143)) + 1
+            return [fr("puño_cerrado", t0 + i * 0.143, raw=None if i == 6 else "=") for i in range(n)]
+        a = tramo(0.0, 2.0)
+        # Hueco de 0,9 s: NO reinicia (y, como todo intervalo < 1 s con evidencia, suma). El
+        # paso solo puede salir si se conservó lo del primer tramo: 1,5 s solos no llegan a 3 s.
+        self.assertEqual(len(self._steps(a + tramo(a[-1].t + 0.9, 1.5))), 1)
+        # Hueco de 1,1 s: reinicia; después solo hay 1,5 s, no llega a 3 s.
+        self.assertEqual(self._steps(a + tramo(a[-1].t + 1.1, 1.5)), [])
+
     def test_change_none_and_clock_back_reset(self):
         for breaker in (fr("dedo_pulgar", 2.1), fr(None, 2.1, raw=None)):
             frames = hold("puño_cerrado", 0.0, 2.0) + [breaker] + hold("puño_cerrado", 2.2, 2.0)
