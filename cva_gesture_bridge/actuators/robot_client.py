@@ -304,7 +304,8 @@ class HoldTracker:
       cuadro suelto) y el intervalo es < `max_gap_s`.
     - Si falla cualquiera de las dos cosas, la cuenta vuelve a cero. También si cambia
       el objetivo, si no hay objetivo o si el reloj retrocede.
-    - Hay un paso al llegar a `start_s` y otro por cada `step_s` sostenidos después.
+    - Hay un paso al llegar a `start_s` y otro por cada `step_s` sostenidos después,
+      contados desde la evidencia que había en el paso anterior.
 
     Por qué: el confirmado sigue vigente ~2,3-2,9 s después de que la mano se va
     (histéresis del estabilizador); contarlo daba pasos con 0,1-1 s de mano real
@@ -327,6 +328,7 @@ class HoldTracker:
         self.target: Optional[str] = None
         self.accumulated_s = 0.0
         self.steps = 0
+        self._next_step_at = self.start_s
 
     def observe(self, target: Optional[str], raw: Optional[str], raw_conf: float, t: float) -> bool:
         """Un cuadro. True si en este cuadro toca un paso."""
@@ -346,10 +348,16 @@ class HoldTracker:
         if dt is None or dt < 0 or dt >= self.max_gap_s or matches < self.min_matches:
             self.accumulated_s = 0.0
             self.steps = 0
+            self._next_step_at = self.start_s
             return False
         self.accumulated_s += dt
-        if self.accumulated_s >= self.start_s + self.steps * self.step_s:
+        if self.accumulated_s >= self._next_step_at:
             self.steps += 1
+            # El siguiente paso se cuenta desde la evidencia de ESTE paso, no desde una
+            # marca fija (3, 6, 9 s): así dos pasos quedan separados por al menos
+            # step_s de evidencia, y como la evidencia nunca avanza más rápido que el
+            # reloj, el mínimo entre pasos (igual a step_s) no omite ninguno.
+            self._next_step_at = self.accumulated_s + self.step_s
             return True
         return False
 

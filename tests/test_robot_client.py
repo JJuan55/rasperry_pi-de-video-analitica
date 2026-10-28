@@ -236,6 +236,18 @@ class HoldTrackerTests(unittest.TestCase):
         b = hold("puño_cerrado", a[-1].t + 1.2, 2.0)
         self.assertEqual(len(self._steps(a + b, max_gap=1.5)), 1)
 
+    def test_next_step_counts_from_evidence_at_previous_step(self):
+        # A ~3,4 fps el primer paso sale con 3,19 s de evidencia: el siguiente toca a
+        # 3,19 + 3 = 6,19 s (no en la marca fija de 6,0), así que cada par de pasos
+        # queda separado por al menos 3 s de evidencia.
+        h = rc.HoldTracker(3.0, 3.0, 1.0, 4, 3, 0.75)
+        at = []
+        for f in hold("puño_cerrado", 0.0, 10.5, period=0.29):
+            if h.observe(f.confirmed, f.raw, f.raw_conf, f.t):
+                at.append(round(h.accumulated_s, 2))
+        self.assertEqual(len(at), 3)
+        self.assertTrue(all(b - a >= 3.0 - 1e-9 for a, b in zip(at, at[1:])), at)
+
     def test_three_of_four_with_gap_0_9_keeps_and_gap_1_1_resets(self):
         # 2,0 s con un cuadro suelto sin crudo (3 de 4 se cumple), luego un hueco y 1,5 s más.
         def tramo(t0, seconds):
@@ -308,6 +320,17 @@ class ControllerLogicTests(unittest.TestCase):
         self.assertTrue(ctrl.stopper.wait(2.0))
         self.assertEqual(ctrl.state, rc.DESARMADO)
         self.assertEqual(paths(sent), STOP_PAIR)
+
+    def test_no_step_is_omitted_by_min_interval_at_low_fps(self):
+        # Caso real del 28/10 15:05: a baja tasa de cuadros el segundo paso quedaba a
+        # 2,86 s del primero, el mínimo de 3 s lo omitía y el contador lo consumía:
+        # pasos cada 6 s en vez de cada 3.
+        ctrl, sent = dry_controller()
+        ctrl.arm(0.0)
+        with self.assertLogs(LOGGER, level="INFO") as logs:
+            feed(ctrl, hold("puño_cerrado", 0.0, 10.5, period=0.29))
+        self.assertFalse(any("omitido" in m for m in logs.output))
+        self.assertEqual(paths(sent), [("POST", rc.PATH_EJECUTAR)] * 3)
 
     def test_min_interval_between_steps(self):
         ctrl, sent = dry_controller(cfg(min_entre_pasos_s=4.0, **FAST))
