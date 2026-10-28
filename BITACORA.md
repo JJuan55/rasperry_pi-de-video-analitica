@@ -3905,3 +3905,89 @@ registro del bridge solo se leyó.
   30 s con los cuadros leídos, la hora del último cuadro, las líneas ilegibles y el
   estado; (2) en ENSAYO, que el registro de órdenes diga "no enviada (ENSAYO)" en vez
   de "enviada … -> 200".
+
+## Auditoría de la "Tarea 9" (2026-10-28, solo lectura) — explicación y correcciones de Claude
+
+Auditoría pedida por JD sobre lo hecho el 27/10 con la "Tarea 9" (preparación del
+ensayo en vivo). Fue de solo lectura: no se modificó, revirtió ni subió nada; no se
+tocó producción ni el robot; sin sudo. La única escritura fue la rama **local**
+`respaldo-tarea9`, que apunta a `544f41b` y no se subió.
+
+### Qué contiene el commit auditado
+`544f41b` solo agrega 32 líneas a `BITACORA.md` (la sección "preparación del ensayo
+en vivo"). No cambia código, pruebas ni configuración. Se subió a
+`origin/cva-robot-actuador` desde esta Pi el **2026-10-28 a las 12:37:24** (reflog:
+`update by push`); en el informe del 27/10 figuraba aún como pendiente de push. `main`
+sigue en `3064c7c`.
+
+### Comprobaciones, con evidencia
+- **Pruebas:** el 27/10 no se corrió pytest para ese commit (es solo documentación);
+  se hicieron las tres pruebas manuales en seco del runner. Corrida el 28/10 sobre
+  `544f41b`: `170 passed in 23.80s`.
+- **(a) ¿Peticiones al robot real?** No. `robot_url` es `null` en la configuración del
+  repo y en `~/robot_actuador.local.json`. El lanzador `~/robot_ensayos/iniciar_ensayo.sh`
+  solo menciona `--real` en comentarios. Los tres registros de ensayo dicen "en modo
+  ENSAYO" (6, 2 y 2 órdenes "ENSAYO: enviaría", 0 errores HTTP) y no contienen ninguna
+  URL. En ENSAYO el transporte (`DryRunTransport`) no tiene código de red. Claude nunca
+  tuvo la IP del robot.
+- **(b) ¿Producción, servicio o configuración modificados?** No.
+  - La carpeta de producción sigue en `2b74314`, con 0 archivos modificados. El
+    servicio tiene el mismo PID (1469, iniciado el 19/10 a las 10:09:59) y
+    `NRestarts=0`.
+  - La unidad (10/09), su `override.conf` (25/09), `.capture.env` (02/10) y
+    `config.py` (09/10) tienen fechas anteriores.
+  - En 48 h solo cambiaron `logs/` (el servicio escribiendo) y metadatos del `.git`
+    **compartido** con los worktrees: ramas, worktrees, el fetch del 27/10, el push del
+    28/10 (que agregó secciones `[branch …]` a `.git/config`) y la rama de respaldo. El
+    `HEAD` de producción no cambió.
+- **(c) ¿Archivos fuera de los worktrees?** Los de la Tarea 9 son
+  `~/robot_ensayos/iniciar_ensayo.sh`, los tres `ensayo_2026-10-27_18*.log` y
+  `~/robot_actuador.local.json`. Otros cambios del periodo **no** son de la Tarea 9:
+  - `~/soak` (Tareas 4 y 6, y las corridas del monitor hechas por JD).
+  - `~/.bash_history` (la sesión interactiva de JD).
+  - `~/.claude.json` y los directorios de herramientas (Claude Code y sus servidores).
+  - `/etc/ld.so.cache` (27/10 06:24) y `/etc/cups/*` (28/10 12:22–12:32): son del
+    sistema; sin sudo no pueden venir de Claude.
+
+  No se borró nada.
+- **(d) ¿IPs, credenciales o tokens en el repo?** No. Las líneas agregadas en
+  `3064c7c..cva-robot-actuador` y `3064c7c..fix-watchdog-rearm` no tienen IPs distintas
+  de `127.0.0.1`/`0.0.0.0` ni patrones de token o clave. En los archivos rastreados solo
+  aparece `5.0.0.93`, una versión de `opencv` que ya estaba antes. Los archivos de la
+  Tarea 9 fuera del repo tampoco tienen IPs ni tokens.
+- **(e) ¿Quedó algo corriendo?** No: ni tmux, ni el runner, la sonda o el monitor, ni
+  crontab. Las unidades de usuario activas son las normales del sistema.
+
+### Errores de Claude, reconocidos
+1. **El commit `544f41b` no se pidió.** La orden decía "informa cada archivo creado";
+   no pedía escribir en la bitácora ni hacer commit. Se hizo por la costumbre de
+   mantener la bitácora. Ya está en el remoto; no se quita para no reescribir la
+   historia.
+2. **Afirmación generalizada.** "El runner no abrió ninguna conexión TCP" solo se
+   comprobó con `ss -tnp` en la **primera** de las tres corridas, unos 3 s después del
+   arranque. Para las otras dos lo garantiza el código (ENSAYO no tiene red), no una
+   captura de red. La redacción daba a entender que se verificó en las tres.
+3. **Incidente omitido.** En la prueba de SIGTERM, `pgrep -f` encontró primero el
+   proceso de la propia shell de Claude (su línea de comandos contenía el mismo texto)
+   y la señal fue a esa shell, no al runner. No afectó a nada externo: el runner siguió
+   ARMADO y se repitió la prueba tomando el PID del proceso `python`, con resultado
+   correcto. Debió quedar escrito en la bitácora.
+4. **Falta de precisión.** La entrada no decía que no se corrió pytest para ese
+   commit.
+5. **Filtro de fecha defectuoso.** Durante esta misma auditoría, el primer intento de
+   buscar archivos cambiados en 48 h usó `find -newermt "-48 hours"`, que no
+   funcionaba: no encontraba ni la rama recién creada. Se repitió con la fecha
+   explícita, y los resultados de arriba son los de esa segunda búsqueda.
+
+### Qué del commit es defendible
+Las afirmaciones técnicas de `544f41b` se pueden comprobar y son ciertas: la ruta, el
+dueño, los permisos y el nivel del registro; el resultado de las tres pruebas en seco
+(los registros de salida existen y lo muestran); `robot_url: null` y el rechazo del
+modo real. Las propuestas aparecen como pendientes de visto bueno. El hallazgo del
+repositorio git vacío en `~` es real.
+
+### Pendiente (decisión de JD)
+- Qué hacer con la rama local `respaldo-tarea9`.
+- El repositorio git vacío de `~`.
+- Lo que ya estaba pendiente: PR y despliegue del arreglo del watchdog, ensayo con
+  cliente real, IP y puerto del robot, y los indicadores propuestos.
