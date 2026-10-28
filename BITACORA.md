@@ -4025,21 +4025,73 @@ Salida literal de `pytest -q` (suite completa):
 
 Único ensayo registrado de los de ese día, por indicación de JD (se registra solo el
 que salió bien). Modo ENSAYO: no se envió nada al robot (todas las órdenes aparecen
-como "ENSAYO (NO enviada)"). Producción intacta. Código: rama `cva-robot-actuador`
-en `2d9b7bb`, que ya incluye el arreglo del sostenimiento (el siguiente paso se cuenta
-desde la evidencia del paso anterior). Salida del runner:
+como "ENSAYO (NO enviada)"). Producción intacta. Salida del runner:
 `~/robot_ensayos/ensayo_2026-10-28_151852.log`, fuera del repo.
+
+**Código que corrió: el contenido de `2d9b7bb`** (arreglo del sostenimiento: el
+siguiente paso se cuenta desde la evidencia del paso anterior). El runner de entonces no
+registraba su versión. Además, el commit (15:19:51) es posterior al arranque (15:18:52).
+Por eso se reconstruyó después, en solo lectura:
+
+- `robot_client.py` se modificó por última vez a las 15:18:14, 38 s antes del arranque,
+  y no volvió a cambiar.
+- El blob en disco (`9fcd7ea`) es idéntico al de `2d9b7bb`. El de `9f70fc3` es
+  `c4ecfd7`. `robot_runner.py` y `config/robot_actuador.json` son iguales en los dos
+  commits.
+- El lanzador usa `PYTHONDONTWRITEBYTECODE=1` y no hay ningún `.pyc` posterior a las
+  15:00.
+- **Decisivo:** se repitieron los mismos cuadros del bridge (15:19:01–15:21:01) con
+  `--reproducir --armar-al-inicio`.
+  - Con `2d9b7bb` salen los 12 pasos idénticos a los del vivo, con la misma evidencia
+    cada uno.
+  - Con `9f70fc3` salen 11: falta el paso de 6,60 s.
+
+El arreglo estaba en el árbol de trabajo sin commit. Desde `420a464`, el runner
+escribe al arrancar el commit, si hay cambios sin commit y el blob de cada archivo.
 
 | Prueba | Resultado (cruzado con el registro del bridge) |
 |---|---|
 | Puño sostenido | Pasos AVANZAR con 3,1–3,4 s de evidencia y siguientes a +3 s (6,2–6,6 s y 9,39 s). **Ningún "paso omitido"** |
 | Pulgar / meñique | GIRAR_IZQUIERDA 15:20:32,591 (meñique confirmado 15:20:28,9), GIRAR_DERECHA 15:20:38,413 (pulgar confirmado 15:20:34,7), GIRAR_IZQUIERDA 15:20:59,034 (meñique confirmado 15:20:55,7) |
-| Sin pasos de más | Cada paso tuvo ≥ 3 s de evidencia cruda según su propia línea. Los gestos confirmados que duraron poco no dieron paso |
+| Sin pasos de más | Cada paso tuvo ≥ 3 s de evidencia cruda según su propia línea. Los puños breves no dieron paso (detalle abajo) |
 | Palma | Primer cuadro con palma 15:20:59,650 → confirmación 15:21:01,010 → PARANDO 15:21:01,042 y BLOQUEADO. **1,39 s** de la mano a la parada (a ~2,8 fps) |
 | Puño estando BLOQUEADO | Puño confirmado 15:21:15,4 sin ningún paso hasta el re-armado (15:21:26) |
 | Inactividad | Armado 15:21:26,109 → desarmado 15:22:26,147 (60,04 s) |
 | Línea de estado | Cada 30 s; los cuadros del runner coinciden con los del bridge; edad 0,1–0,7 s |
 | Salida (`q`) | PARAR y parada confirmada |
+
+**Puños breves y mano que entra y sale**, cruzados cuadro a cuadro con el registro del
+bridge. "Sin mano" es `[diag] Sin gesto … dedos_extendidos=0`.
+
+| Desde | Crudo en el bridge | Resultado en el runner |
+|---|---|---|
+| 15:19:39,357 | sin mano, 4 cuadros (0,9 s) | se reinicia la cuenta |
+| 15:19:41,305 | puño, 6 cuadros (1,9 s) | **sin paso** |
+| 15:19:43,431 | sin mano, 7 cuadros (1,9 s) | se reinicia |
+| 15:19:45,777 | puño, 14 cuadros (4,3 s) | paso AVANZAR 15:19:49,619 (3,33 s de evidencia: puño real > 3 s) |
+| 15:19:50,295 | sin mano, 2 cuadros (0,5 s) | — |
+| 15:19:51,160 | puño, 5 cuadros (1,3 s) | **sin paso** |
+| 15:19:52,779 | sin mano, 4 cuadros (1,1 s) | se reinicia |
+| 15:19:54,276 | puño, 5 cuadros (1,2 s) | **sin paso** |
+| 15:19:55,838 | sin mano, 12 cuadros (3,5 s) | — |
+
+Durante todo ese tramo el bridge mantuvo `puño_cerrado` **confirmado** sin
+interrupción: confirmado a las 15:19:05,170 y liberado a las 15:20:01,010, por su
+histéresis. Un actuador que obedeciera el gesto confirmado habría dado pasos con esos
+puños breves. El runner no los dio porque cuenta solo la evidencia cruda y reinicia con
+cada salida de la mano.
+
+Las interrupciones cortas dentro del puño sostenido también reinician la cuenta: de ahí
+los 3,20 s tras los 6,60 s (15:19:20) y los 3,10 s tras los 6,32 s (15:19:28).
+
+Asignación a las pruebas: el tramo de 15:19:41 corresponde, por su forma, al puño de
+~1 s (prueba #2). El de 15:19:45–15:19:56 corresponde a meter y sacar la mano
+(prueba #3). Esta asignación se infiere del registro; JD no la ha confirmado.
+
+*Corrección del 28/10 (pedida por JD).* La versión original de esta entrada daba el
+código por `2d9b7bb` sin prueba. También resumía las pruebas de gestos breves en una
+sola frase ("los gestos confirmados que duraron poco no dieron paso"). Se reemplazó por
+la verificación y la tabla de arriba.
 
 **Limitación (abierta):** la tasa de cuadros fue de 2,6–3,0 fps, no de 7. Es la misma
 conexión del cliente abierta a las 15:04:28, que empezó a 6,5 fps y bajó a 2,7 en
