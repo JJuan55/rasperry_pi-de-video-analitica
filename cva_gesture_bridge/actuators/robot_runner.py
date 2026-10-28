@@ -33,10 +33,12 @@ Uso:
 """
 
 import argparse
+import hashlib
 import logging
 import os
 import re
 import signal
+import subprocess
 import sys
 import threading
 import time
@@ -264,6 +266,47 @@ def check_robot_ready(factory, cfg) -> Optional[str]:
     return check_status_motors(resp.status, resp.body, cfg)
 
 
+def git_blob_id(path: str) -> str:
+    """Mismo id que `git hash-object`: se compara directo con `git rev-parse <commit>:<ruta>`
+    y no necesita git ni un repositorio (sirve también para una copia exportada)."""
+    with open(path, "rb") as f:
+        data = f.read()
+    return hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
+
+
+def _run_git(args: List[str], cwd: str) -> Optional[str]:
+    """Solo lectura (GIT_OPTIONAL_LOCKS=0). None si git falla o no hay repositorio."""
+    try:
+        out = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, timeout=5,
+                             env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"})
+    except (OSError, subprocess.TimeoutExpired) as e:
+        logger.warning("Versión: git no disponible (%s)", e)
+        return None
+    return out.stdout.strip() if out.returncode == 0 else None
+
+
+def code_version_line(config_path: str, git=_run_git) -> str:
+    """Qué código y qué configuración corren: commit de HEAD, si los archivos del actuador
+    difieren de ese commit, e id de blob de cada archivo tal como está en disco (los
+    módulos ya se importaron de esos mismos archivos). El ensayo del 28/10 15:18 no lo
+    registraba y hubo que reconstruir la versión después (ver BITACORA.md)."""
+    pkg = os.path.dirname(os.path.abspath(__file__))
+    files = [os.path.join(pkg, "robot_client.py"), os.path.abspath(__file__), os.path.abspath(config_path)]
+    head = git(["rev-parse", "--short=7", "HEAD"], pkg)
+    if head is None:
+        commit = "commit=desconocido (sin repositorio git)"
+    else:
+        dirty = git(["status", "--porcelain", "--", *files], pkg)
+        if dirty is None:
+            commit = f"commit={head} (estado del árbol desconocido)"
+        elif dirty:
+            commit = f"commit={head} CON CAMBIOS SIN COMMIT"
+        else:
+            commit = f"commit={head} sin cambios"
+    blobs = " ".join(f"{os.path.basename(p)}={git_blob_id(p)[:7]}" for p in files)
+    return f"Código: {commit}; blobs en disco: {blobs}"
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--config", required=True)
@@ -302,6 +345,7 @@ def main(argv=None) -> int:
     # bloquear la lectura.
     controller = RobotController(cfg, factory, threaded_routes=not args.reproducir)
     logger.warning("Actuador del robot en modo %s. Estado inicial: %s", "REAL" if args.real else "ENSAYO", controller.state)
+    logger.warning("%s", code_version_line(args.config))
     stop = threading.Event()
     frames = DiagFrameParser()
 

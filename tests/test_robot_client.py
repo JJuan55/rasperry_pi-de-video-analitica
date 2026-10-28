@@ -775,6 +775,48 @@ class StatusLineAndDryRunLogTests(unittest.TestCase):
         self.assertFalse(any("ENSAYO" in m for m in logs.output))
 
 
+class CodeVersionTests(unittest.TestCase):
+    """El runner registra al arrancar qué código y qué configuración corren."""
+
+    CLIENT = os.path.join(REPO, "cva_gesture_bridge", "actuators", "robot_client.py")
+
+    def test_blob_id_matches_git_hash_object(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "f")
+            for data, expected in ((b"", "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391"),
+                                   (b"hello\n", "ce013625030ba8dba906f756967f9e9ca394464a")):
+                with open(p, "wb") as f:
+                    f.write(data)
+                self.assertEqual(rr.git_blob_id(p), expected)
+
+    def _line(self, head, status):
+        def fake_git(args, cwd):
+            return head if args[0] == "rev-parse" else status
+        return rr.code_version_line(CONF_FILE, git=fake_git)
+
+    def test_line_states_commit_and_whether_tree_differs(self):
+        self.assertIn("commit=abc1234 sin cambios", self._line("abc1234", ""))
+        self.assertIn("commit=abc1234 CON CAMBIOS SIN COMMIT", self._line("abc1234", " M robot_client.py"))
+        self.assertIn("commit=abc1234 (estado del árbol desconocido)", self._line("abc1234", None))
+        self.assertIn("commit=desconocido (sin repositorio git)", self._line(None, None))
+
+    def test_line_has_blob_of_each_file_on_disk_even_without_git(self):
+        line = self._line(None, None)
+        self.assertIn(f"robot_client.py={rr.git_blob_id(self.CLIENT)[:7]}", line)
+        self.assertIn(f"robot_runner.py={rr.git_blob_id(rr.__file__)[:7]}", line)
+        self.assertIn(f"robot_actuador.json={rr.git_blob_id(CONF_FILE)[:7]}", line)
+
+    def test_main_logs_version_at_startup(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".log", delete=False) as f:
+            f.write("inicio\n")
+        self.addCleanup(os.unlink, f.name)
+        with self.assertLogs("cva_gesture_bridge.actuators.robot_runner", level="WARNING") as logs:
+            self.assertEqual(rr.main(["--config", CONF_FILE, "--reproducir", f.name]), 0)
+        lines = [m for m in logs.output if "Código: commit=" in m]
+        self.assertEqual(len(lines), 1)
+        self.assertIn(f"robot_client.py={rr.git_blob_id(self.CLIENT)[:7]}", lines[0])
+
+
 if __name__ == "__main__":
     logging.basicConfig(level=logging.CRITICAL)
     unittest.main()
