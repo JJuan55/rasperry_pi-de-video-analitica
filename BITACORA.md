@@ -3991,3 +3991,32 @@ repositorio git vacío en `~` es real.
 - El repositorio git vacío de `~`.
 - Lo que ya estaba pendiente: PR y despliegue del arreglo del watchdog, ensayo con
   cliente real, IP y puerto del robot, y los indicadores propuestos.
+
+## Fase 11, Etapa 1 — línea de estado y registro honesto en ENSAYO (2026-10-28, Tarea 10)
+
+Aprobado por JD. Sin robot real, sin tocar producción, sin push.
+
+- **Línea de estado del runner (solo `--seguir`):** clave nueva `estado_cada_s` (float,
+  30 por defecto; 0 la desactiva; si no es 0, debe estar entre 5 y 600). Cada
+  `estado_cada_s`, un INFO con modo, estado, cuadros leídos, hora del último cuadro
+  (la de su línea del registro) y su edad, líneas ilegibles, gestos ilegibles, pasos
+  encolados y órdenes. Si la edad supera 5 s, un WARNING "SIN CUADROS hace X s" ("SIN
+  CUADROS desde el arranque" si nunca llegó ninguno). Solo lee contadores; el único
+  agregado al controlador es el contador `steps_enqueued`, que no interviene en el
+  control. Hay una prueba que compara las órdenes con y sin línea de estado.
+- **Registro honesto en ENSAYO:** con el transporte de ensayo, `OrderLog` escribe
+  "ENSAYO (NO enviada): MÉTODO RUTA" en lugar de "enviada … -> 200". Con el
+  transporte real no cambia.
+- **Pruebas:** 8 nuevas en `StatusLineAndDryRunLogTests`, con reloj inyectado en
+  `StatusReporter`. Las 62 del actuador son estables en 3 corridas.
+- **Regresión de la medición:** se reprodujeron las copias del 13/10 con el mismo
+  método y salieron los mismos números: 37 pasos con la regla nueva, 0 con menos de
+  3,0 s de mano real, 0 de 5 legítimos perdidos.
+
+Salida literal de `pytest -q` (suite completa):
+```
+........................................................................ [ 40%]
+........................................................................ [ 80%]
+..................................                                       [100%]
+178 passed in 24.51s
+```

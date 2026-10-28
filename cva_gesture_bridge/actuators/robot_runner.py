@@ -98,6 +98,8 @@ class DiagFrameParser:
         self.confirmed: Optional[str] = None
         self.confirmed_conf = 0.0
         self.illegible = 0
+        self.frames_read = 0  # cuadros reales (líneas [diag]) emitidos
+        self.last_frame_t: Optional[float] = None  # hora de registro del último cuadro
         self._pending = None  # [t, crudo, conf_crudo, emitido]
 
     def feed(self, line: str) -> List[FrameInput]:
@@ -157,6 +159,46 @@ class DiagFrameParser:
             self.confirmed_conf = conf
         out.append(FrameInput(self.confirmed, self.confirmed_conf, raw, conf, t))
         p[3] = True
+        self.frames_read += 1
+        self.last_frame_t = t
+
+
+class StatusReporter:
+    """Línea de estado periódica en --seguir (`estado_cada_s`; 0 = desactivada). Solo
+    lee contadores: no toca el control. `now` es la hora de pared (time.time()), la
+    misma base que la hora de las líneas del registro, y se pasa desde fuera para
+    poder probarlo con un reloj inyectado."""
+
+    STALE_S = 5.0  # edad del último cuadro a partir de la cual se avisa
+
+    def __init__(self, every_s: float, mode: str, start: float) -> None:
+        self.every_s = every_s
+        self.mode = mode
+        self._next = start + every_s
+
+    def maybe_report(self, now: float, controller: RobotController, frames: "DiagFrameParser") -> bool:
+        """Emite la línea si toca. Devuelve True si emitió."""
+        if not self.every_s or now < self._next:
+            return False
+        self._next = now + self.every_s
+        last = frames.last_frame_t
+        if last is None:
+            last_txt, age = "ninguno", None
+        else:
+            last_txt = datetime.fromtimestamp(last).strftime("%H:%M:%S,%f")[:-3]
+            age = now - last
+        logger.info(
+            "Estado: modo=%s estado=%s cuadros=%d último=%s edad=%s ilegibles=%d gestos_ilegibles=%d "
+            "pasos_encolados=%d órdenes=%d",
+            self.mode, controller.state, frames.frames_read, last_txt,
+            "-" if age is None else f"{age:.1f}s", frames.illegible, controller.illegible,
+            controller.steps_enqueued, len(controller.order_log.records),
+        )
+        if age is None:
+            logger.warning("SIN CUADROS desde el arranque")
+        elif age > self.STALE_S:
+            logger.warning("SIN CUADROS hace %.1f s", age)
+        return True
 
 
 def follow_lines(path: str, stop: threading.Event, poll_s: float = 0.05):
@@ -287,11 +329,14 @@ def main(argv=None) -> int:
         else:
             threading.Thread(target=keyboard_loop, args=(controller, stop), daemon=True).start()
             print("Comandos: a=armar  d=desarmar  p=parar  q=salir", flush=True)
+            status = StatusReporter(cfg.estado_cada_s, "REAL" if args.real else "ENSAYO", time.time())
             for line in follow_lines(args.seguir, stop):
                 if line is not None:
                     for fr in frames.feed(line):
                         controller.observe(fr)
-                controller.tick(time.time())
+                now = time.time()
+                controller.tick(now)
+                status.maybe_report(now, controller, frames)
     finally:
         confirmed = controller.close(args.espera_parada_s)  # PARAR antes de salir
         for s, h in previous.items():

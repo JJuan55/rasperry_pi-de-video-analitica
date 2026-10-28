@@ -648,6 +648,110 @@ class RunnerTests(unittest.TestCase):
         self._run_follow_and_signal(signal.SIGINT)
 
 
+class StatusLineAndDryRunLogTests(unittest.TestCase):
+    """Tarea 10: línea de estado de --seguir (B) y registro honesto en ENSAYO (C)."""
+
+    LINE = ("2026-10-27 10:00:00,000 INFO __main__: [diag] Gesto candidato: puño_cerrado "
+            "(confianza=0.95, dedos_extendidos=0, confirmado=True)")
+
+    def test_estado_cada_s_validation_and_repo_value(self):
+        self.assertEqual(rc.load_robot_config(CONF_FILE).estado_cada_s, 30.0)
+        for ok in (0, 0.0, 5, 30.0, 600):
+            self.assertEqual(cfg(estado_cada_s=ok).estado_cada_s, float(ok))
+        for bad in (4.9, 600.1, -1, True, "30", float("nan")):
+            with self.assertRaises(rc.RobotConfigError, msg=repr(bad)):
+                cfg(estado_cada_s=bad)
+
+    def _parser_with_frame_at(self, line):
+        p = rr.DiagFrameParser()
+        p.feed(line)
+        p.flush()
+        return p
+
+    def test_parser_counts_only_real_frames_with_log_time(self):
+        p = rr.DiagFrameParser()
+        p.feed(self.LINE)
+        p.feed(self.LINE.replace("10:00:00,000", "10:00:00,143"))
+        p.feed("2026-10-27 10:00:01,000 INFO x: Conexión con ('127.0.0.1', 1) finalizada. total_frames=2")
+        p.feed("2026-10-27 10:00:01,100 INFO __main__: [diag] Gesto candidato: basura (confian")  # ilegible
+        self.assertEqual(p.frames_read, 2)  # el corte de conexión no cuenta como cuadro
+        self.assertEqual(p.last_frame_t, datetime.strptime("2026-10-27 10:00:00,143", "%Y-%m-%d %H:%M:%S,%f").timestamp())
+        self.assertEqual(p.illegible, 1)
+
+    def test_status_line_interval_fields_and_stale_warning(self):
+        ctrl, _ = dry_controller()
+        frames = self._parser_with_frame_at(self.LINE)
+        t_frame = frames.last_frame_t
+        rep = rr.StatusReporter(30.0, "ENSAYO", start=t_frame)
+        self.assertFalse(rep.maybe_report(t_frame + 29.9, ctrl, frames))  # todavía no toca
+        with self.assertLogs("cva_gesture_bridge.actuators.robot_runner", level="INFO") as logs:
+            self.assertTrue(rep.maybe_report(t_frame + 30.0, ctrl, frames))
+        info = [m for m in logs.output if m.startswith("INFO")]
+        self.assertEqual(len(info), 1)
+        for field in ("modo=ENSAYO", "estado=DESARMADO", "cuadros=1", "último=10:00:00,000",
+                      "edad=30.0s", "ilegibles=0", "gestos_ilegibles=0", "pasos_encolados=0", "órdenes=0"):
+            self.assertIn(field, info[0])
+        self.assertTrue(any("WARNING" in m and "SIN CUADROS hace 30.0 s" in m for m in logs.output))
+        self.assertFalse(rep.maybe_report(t_frame + 59.9, ctrl, frames))  # siguiente, 30 s después
+
+    def test_no_warning_when_frames_are_fresh_and_warning_without_any_frame(self):
+        ctrl, _ = dry_controller()
+        frames = self._parser_with_frame_at(self.LINE)
+        rep = rr.StatusReporter(5.0, "ENSAYO", start=frames.last_frame_t - 1.0)
+        with self.assertLogs("cva_gesture_bridge.actuators.robot_runner", level="INFO") as logs:
+            rep.maybe_report(frames.last_frame_t + 4.0, ctrl, frames)  # edad 4 s <= 5 s
+        self.assertFalse(any("SIN CUADROS" in m for m in logs.output))
+        empty = rr.DiagFrameParser()
+        rep2 = rr.StatusReporter(5.0, "ENSAYO", start=0.0)
+        with self.assertLogs("cva_gesture_bridge.actuators.robot_runner", level="INFO") as logs:
+            rep2.maybe_report(10.0, ctrl, empty)
+        self.assertTrue(any("cuadros=0" in m and "último=ninguno" in m for m in logs.output))
+        self.assertTrue(any("SIN CUADROS desde el arranque" in m for m in logs.output))
+
+    def test_status_line_disabled_with_zero(self):
+        ctrl, _ = dry_controller()
+        rep = rr.StatusReporter(0.0, "ENSAYO", start=0.0)
+        self.assertFalse(rep.maybe_report(10_000.0, ctrl, rr.DiagFrameParser()))
+
+    def test_status_line_does_not_alter_control(self):
+        def run(with_status):
+            ctrl, sent = dry_controller()
+            frames = rr.DiagFrameParser()
+            rep = rr.StatusReporter(5.0, "ENSAYO", start=0.0)
+            ctrl.arm(0.0)
+            for f in hold("puño_cerrado", 0.0, 6.5):
+                ctrl.observe(f)
+                if with_status:
+                    rep.maybe_report(f.t + 6.0, ctrl, frames)  # fuerza líneas de estado a menudo
+            return paths(sent), ctrl.state, ctrl.steps_enqueued
+        with self.assertLogs("cva_gesture_bridge.actuators.robot_runner", level="INFO"):
+            with_s = run(True)
+        self.assertEqual(with_s, run(False))
+        self.assertEqual(with_s[2], 2)  # pasos a los 3 y a los 6 s
+
+    def test_dry_run_order_log_says_not_sent(self):
+        ctrl, _ = dry_controller()
+        ctrl.arm(0.0)
+        with self.assertLogs(LOGGER, level="INFO") as logs:
+            feed(ctrl, hold("puño_cerrado", 0.0, 3.2))
+            ctrl.observe(fr("palma_abierta", 3.3))
+            self.assertTrue(ctrl.stopper.wait(2.0))
+        msgs = [m for m in logs.output if "Robot:" in m]
+        self.assertTrue(any("Robot: ENSAYO (NO enviada): POST /ejecutar_ruta" in m for m in msgs))
+        self.assertTrue(any("Robot: ENSAYO (NO enviada): POST /detener_ejecucion" in m for m in msgs))
+        self.assertFalse(any("enviada" in m and "->" in m for m in msgs))  # nada de "enviada ... -> 200"
+
+    def test_real_transport_still_logs_sent_with_status(self):
+        sim = RobotSim()
+        self.addCleanup(sim.close)
+        t = rc.HttpRobotTransport(sim.url, 1.0)
+        self.addCleanup(t.close)
+        with self.assertLogs(LOGGER, level="INFO") as logs:
+            rc.OrderLog().send(t, "GET", rc.PATH_STATUS)
+        self.assertTrue(any("GET /status enviada" in m and "-> 200" in m for m in logs.output))
+        self.assertFalse(any("ENSAYO" in m for m in logs.output))
+
+
 if __name__ == "__main__":
     logging.basicConfig(level=logging.CRITICAL)
     unittest.main()

@@ -21,5 +21,6 @@
   "margen_parada_s": 6.0,
   "sondeo_parada_s": 0.3,
   "alarma_parada_s": 10.0,
+  "estado_cada_s": 30.0,
   "robot_url": null
 }

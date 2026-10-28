@@ -112,6 +112,7 @@ class RobotConfig:
     margen_parada_s: float = 6.0  # vigilancia tras el último envío de ruta
     sondeo_parada_s: float = 0.3
     alarma_parada_s: float = 10.0  # en PARANDO sin confirmar más que esto -> ERROR
+    estado_cada_s: float = 30.0  # línea de estado en --seguir; 0 = desactivada
     robot_url: Optional[str] = None  # sin valor por defecto: el modo real lo exige
 
 
@@ -121,7 +122,8 @@ _FIELD_TYPES = {
     "sostener_paso_s": float, "hueco_max_s": float, "ventana_crudo": int,
     "coincidencias_crudo": int, "min_entre_pasos_s": float,
     "desarme_inactividad_s": float, "timeout_http_s": float, "margen_parada_s": float,
-    "sondeo_parada_s": float, "alarma_parada_s": float, "robot_url": (str, type(None)),
+    "sondeo_parada_s": float, "alarma_parada_s": float, "estado_cada_s": float,
+    "robot_url": (str, type(None)),
 }
 
 
@@ -194,6 +196,8 @@ def validate_config(cfg: RobotConfig) -> None:
         raise RobotConfigError("timeout_http_s debe estar entre 0.1 y 5.0")
     if not (0.05 <= cfg.sondeo_parada_s <= 2.0):
         raise RobotConfigError("sondeo_parada_s debe estar entre 0.05 y 2.0")
+    if cfg.estado_cada_s != 0 and not (5.0 <= cfg.estado_cada_s <= 600.0):
+        raise RobotConfigError("estado_cada_s debe ser 0 (desactivada) o estar entre 5 y 600")
     if cfg.robot_url is not None:
         parsed = urllib.parse.urlparse(cfg.robot_url)
         if parsed.scheme != "http" or not parsed.hostname or parsed.path not in ("", "/"):
@@ -464,7 +468,11 @@ class OrderLog:
             return None
         with self._lock:
             self.records.append(OrderRecord(method, path, body, sent_wall, sent_mono, resp.status, resp.elapsed_ms, None))
-        logger.info("Robot: %s %s enviada %s -> %d en %.0f ms", method, path, sent_wall, resp.status, resp.elapsed_ms)
+        if getattr(transport, "dry", False):
+            # ENSAYO: no salió nada por la red; no se informa un "enviada -> 200" que no existió.
+            logger.info("Robot: ENSAYO (NO enviada): %s %s", method, path)
+        else:
+            logger.info("Robot: %s %s enviada %s -> %d en %.0f ms", method, path, sent_wall, resp.status, resp.elapsed_ms)
         return resp
 
 
@@ -730,6 +738,7 @@ class RobotController:
         self._last_step_t: Optional[float] = None
         self._last_activity_t: Optional[float] = None
         self.illegible = 0
+        self.steps_enqueued = 0  # solo para la línea de estado; no interviene en el control
         self.order_log = OrderLog()
         self.routes = RouteDispatcher(transport_factory(), self.order_log, self._on_route_failure, threaded_routes)
         self.stopper = StopSupervisor(cfg, transport_factory, self.order_log, self.routes, self._on_stop_confirmed)
@@ -811,6 +820,7 @@ class RobotController:
                 logger.warning("Robot: paso de %s descartado (ruta en vuelo o bloqueado)", confirmed_action)
                 return
             self._last_step_t = frame.t
+            self.steps_enqueued += 1
             self._last_activity_t = frame.t
         logger.info("Robot: paso %s encolado (%.2fs con evidencia cruda)", confirmed_action, self.tracker.accumulated_s)
 
