@@ -4020,3 +4020,37 @@ Salida literal de `pytest -q` (suite completa):
 ..................................                                       [100%]
 178 passed in 24.51s
 ```
+
+## Fase 11, Etapa 1 — ensayo en vivo con cliente real, en ENSAYO (2026-10-28, 15:18–15:23)
+
+Único ensayo registrado de los de ese día, por indicación de JD (se registra solo el
+que salió bien). Modo ENSAYO: no se envió nada al robot (todas las órdenes aparecen
+como "ENSAYO (NO enviada)"). Producción intacta. Código: rama `cva-robot-actuador`
+en `2d9b7bb`, que ya incluye el arreglo del sostenimiento (el siguiente paso se cuenta
+desde la evidencia del paso anterior). Salida del runner:
+`~/robot_ensayos/ensayo_2026-10-28_151852.log`, fuera del repo.
+
+| Prueba | Resultado (cruzado con el registro del bridge) |
+|---|---|
+| Puño sostenido | Pasos AVANZAR con 3,1–3,4 s de evidencia y siguientes a +3 s (6,2–6,6 s y 9,39 s). **Ningún "paso omitido"** |
+| Pulgar / meñique | GIRAR_IZQUIERDA 15:20:32,591 (meñique confirmado 15:20:28,9), GIRAR_DERECHA 15:20:38,413 (pulgar confirmado 15:20:34,7), GIRAR_IZQUIERDA 15:20:59,034 (meñique confirmado 15:20:55,7) |
+| Sin pasos de más | Cada paso tuvo ≥ 3 s de evidencia cruda según su propia línea. Los gestos confirmados que duraron poco no dieron paso |
+| Palma | Primer cuadro con palma 15:20:59,650 → confirmación 15:21:01,010 → PARANDO 15:21:01,042 y BLOQUEADO. **1,39 s** de la mano a la parada (a ~2,8 fps) |
+| Puño estando BLOQUEADO | Puño confirmado 15:21:15,4 sin ningún paso hasta el re-armado (15:21:26) |
+| Inactividad | Armado 15:21:26,109 → desarmado 15:22:26,147 (60,04 s) |
+| Línea de estado | Cada 30 s; los cuadros del runner coinciden con los del bridge; edad 0,1–0,7 s |
+| Salida (`q`) | PARAR y parada confirmada |
+
+**Limitación (abierta):** la tasa de cuadros fue de 2,6–3,0 fps, no de 7. Es la misma
+conexión del cliente abierta a las 15:04:28, que empezó a 6,5 fps y bajó a 2,7 en
+~15 min. A esa tasa, la palma tarda ~1,4 s en confirmarse; a 7 fps serían ~0,6–0,7 s.
+La sonda `~/soak/recvq_probe.py` (solo lectura de `/proc/net/tcp`), cruzada con el
+journal mediante `gaps_vs_recvq.py`, dio lo siguiente: de 15:04 a 15:12, 340 de 343
+huecos > 286 ms con el socket del bridge vacío (3 dudosos); de 15:12 a 15:24, 1076 de
+1082 vacíos (6 dudosos). **Ninguno con datos esperando en la Pi:** los cuadros no
+llegan al bridge, no es que la Pi los lea tarde. No se sabe todavía en qué tramo
+(cliente, red o túnel) se pierde el ritmo; JD decidió no ampliar la sonda.
+
+**Pendiente:** resolver la caída de fps antes del modo real; definir si mostrar un
+gesto cuenta como "actividad" para el desarme por inactividad (hoy solo cuentan los
+pasos).
