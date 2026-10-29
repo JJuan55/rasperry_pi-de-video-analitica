@@ -22,6 +22,9 @@ Seguridad, en orden de prioridad:
 4. Sostenimiento medido en tiempo real y solo con evidencia cruda (HoldTracker).
 5. Movimiento solo en ARMADO; tras cualquier parada, error o timeout hace falta
    re-armar explícitamente. Desarme automático por inactividad.
+6. Modo real: cada paso se verifica en las dos ruedas (posición del encoder en
+   /status antes y después). `ok:true` y `connected:true` no prueban que una rueda se
+   mueva: el robot contesta igual aunque no pueda mover ese motor.
 """
 
 import http.client
@@ -36,7 +39,7 @@ import urllib.parse
 from collections import deque
 from dataclasses import dataclass, fields
 from datetime import datetime
-from typing import Callable, List, Optional
+from typing import Callable, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -113,6 +116,9 @@ class RobotConfig:
     sondeo_parada_s: float = 0.3
     alarma_parada_s: float = 10.0  # en PARANDO sin confirmar más que esto -> ERROR
     estado_cada_s: float = 30.0  # línea de estado en --seguir; 0 = desactivada
+    verificacion_espera_s: float = 5.0  # modo real: tope para ver ejecutando:false tras un paso
+    verificacion_tol_grados: float = 10.0  # tolerancia por rueda: máx(tol_grados,
+    verificacion_tol_frac: float = 0.15  # tol_frac * |grados esperados|)
     robot_url: Optional[str] = None  # sin valor por defecto: el modo real lo exige
 
 
@@ -123,7 +129,8 @@ _FIELD_TYPES = {
     "coincidencias_crudo": int, "min_entre_pasos_s": float,
     "desarme_inactividad_s": float, "timeout_http_s": float, "margen_parada_s": float,
     "sondeo_parada_s": float, "alarma_parada_s": float, "estado_cada_s": float,
-    "robot_url": (str, type(None)),
+    "verificacion_espera_s": float, "verificacion_tol_grados": float,
+    "verificacion_tol_frac": float, "robot_url": (str, type(None)),
 }
 
 
@@ -198,6 +205,13 @@ def validate_config(cfg: RobotConfig) -> None:
         raise RobotConfigError("sondeo_parada_s debe estar entre 0.05 y 2.0")
     if cfg.estado_cada_s != 0 and not (5.0 <= cfg.estado_cada_s <= 600.0):
         raise RobotConfigError("estado_cada_s debe ser 0 (desactivada) o estar entre 5 y 600")
+    if not (0.5 <= cfg.verificacion_espera_s <= 30.0):
+        raise RobotConfigError("verificacion_espera_s debe estar entre 0.5 y 30")
+    if not (0.0 <= cfg.verificacion_tol_grados and 0.0 <= cfg.verificacion_tol_frac < 1.0):
+        raise RobotConfigError("verificacion_tol_grados debe ser >= 0 y verificacion_tol_frac estar en [0, 1)")
+    if wheel_tolerance(cfg.grados_paso, cfg) >= cfg.grados_paso:
+        # Si no, una rueda quieta (delta 0) entraría en tolerancia y la verificación no serviría.
+        raise RobotConfigError("la tolerancia de la verificación de ruedas debe ser menor que grados_paso")
     if cfg.robot_url is not None:
         parsed = urllib.parse.urlparse(cfg.robot_url)
         if parsed.scheme != "http" or not parsed.hostname or parsed.path not in ("", "/"):
@@ -283,13 +297,59 @@ def check_status_motors(status: int, body: str, cfg: RobotConfig) -> Optional[st
     if not isinstance(motors, list):
         return "/status sin lista 'motors'"
     for wanted in (cfg.motor_izq, cfg.motor_der):
-        found = [m for m in motors if isinstance(m, dict) and isinstance(m.get("port"), str)
-                 and (m["port"] == wanted or m["port"].endswith(":" + wanted))]
+        found = _motors_on_port(motors, wanted)
         if not found:
             return f"/status no informa el motor {wanted}"
         if not all(m.get("connected") is True for m in found):
             return f"el motor {wanted} no está conectado"
     return None
+
+
+def _motors_on_port(motors: list, wanted: str) -> list:
+    return [m for m in motors if isinstance(m, dict) and isinstance(m.get("port"), str)
+            and (m["port"] == wanted or m["port"].endswith(":" + wanted))]
+
+
+# --- Verificación de las dos ruedas tras cada paso (modo real) ------------------------
+
+def read_wheel_positions(status: int, body: str, cfg: RobotConfig) -> Tuple[Optional[Dict[str, int]], Optional[str]]:
+    """GET /status -> ({puerto: position}, None) o (None, motivo). Exige los dos motores
+    configurados, una sola vez cada uno, con connected:true y `position` entera (grados
+    acumulados del encoder; no se reinicia)."""
+    problem = check_status_motors(status, body, cfg)
+    if problem:
+        return None, problem
+    motors = parse_json_object(body)["motors"]
+    positions = {}
+    for wanted in (cfg.motor_izq, cfg.motor_der):
+        found = _motors_on_port(motors, wanted)
+        if len(found) != 1:
+            return None, f"/status informa {len(found)} veces el motor {wanted}"
+        pos = found[0].get("position")
+        if not _is_int(pos):
+            return None, f"/status: 'position' de {wanted} ilegible: {pos!r}"
+        positions[wanted] = pos
+    return positions, None
+
+
+def wheel_tolerance(expected: int, cfg: RobotConfig) -> float:
+    return max(cfg.verificacion_tol_grados, cfg.verificacion_tol_frac * abs(expected))
+
+
+def check_wheel_deltas(before: Dict[str, int], after: Dict[str, int], paso: dict,
+                       cfg: RobotConfig) -> Tuple[bool, str]:
+    """(todo bien, detalle por rueda). Esperado = los grados enviados en el paso, que ya
+    llevan el signo de la acción."""
+    ok_all, parts = True, []
+    for side, motor_key, deg_key in (("izquierda", "motorIzq", "gradosIzq"), ("derecha", "motorDer", "gradosDer")):
+        port, expected = paso[motor_key], paso[deg_key]
+        delta = after[port] - before[port]
+        tol = wheel_tolerance(expected, cfg)
+        ok = abs(delta - expected) <= tol
+        ok_all = ok_all and ok
+        parts.append(f"{port} ({side}) se movió {delta:+d}° (esperado {expected:+d}° ±{tol:.1f}°)"
+                     + ("" if ok else " FUERA DE TOLERANCIA"))
+    return ok_all, "; ".join(parts)
 
 
 # --- Sostenimiento en tiempo real con evidencia cruda --------------------------------
@@ -497,15 +557,23 @@ class RouteDispatcher:
     - Fallo (sin respuesta, código inesperado, totalPasos distinto): on_failure ->
       PARAR. Nunca se reenvía. 409: no se reintenta, se registra.
     - Expone `in_flight` y `last_send_mono` para la vigilancia de la parada.
+    - Con `verify_cfg` y un transporte real (no ENSAYO), verifica cada paso: /status
+      antes (si falla, el paso no se envía), /estado_ejecucion hasta ejecutando:false
+      (como mucho `verificacion_espera_s`) y /status después; cada rueda debe moverse
+      lo enviado ± tolerancia. Cualquier dato faltante o ilegible, el tiempo agotado o
+      una rueda fuera de tolerancia es un paso fallido (on_failure -> PARAR). La
+      verificación cuenta como ruta en vuelo. Un PARAR (`block()`) la corta en la
+      siguiente consulta y entonces no se informa como fallo de rueda.
 
     Con threaded=False ejecuta en línea (pruebas deterministas de la lógica)."""
 
     def __init__(self, transport, order_log: OrderLog, on_failure: Callable[[str], None],
-                 threaded: bool = True) -> None:
+                 threaded: bool = True, verify_cfg: Optional[RobotConfig] = None) -> None:
         self.transport = transport
         self.log = order_log
         self.on_failure = on_failure
         self.threaded = threaded
+        self.verify_cfg = None if getattr(transport, "dry", False) else verify_cfg
         self.last_send_mono: Optional[float] = None
         self._cv = threading.Condition()
         self._pending: Optional[dict] = None
@@ -526,6 +594,7 @@ class RouteDispatcher:
         with self._cv:
             self._blocked = True
             self._pending = None
+            self._cv.notify_all()  # despierta la espera de la verificación
 
     def unblock(self) -> None:
         with self._cv:
@@ -596,9 +665,19 @@ class RouteDispatcher:
             logger.error("Robot: orden NO enviada, %s", e)
             self.on_failure(f"tope duro: {e}")
             return
+        before = None
+        if self.verify_cfg is not None:
+            before = self._read_positions("antes del paso")
+            if before is None:
+                return  # sin posiciones de partida no se mueve el robot
+            if self._interrupted():
+                logger.warning("Robot: PARAR antes de enviar el paso: no se envía")
+                return
         self.last_send_mono = time.monotonic()
         resp = self.log.send(self.transport, "POST", PATH_EJECUTAR, payload)
         if resp is not None and route_response_ok(resp.status, resp.body, len(payload["pasos"])):
+            if before is not None:
+                self._verify_step(payload["pasos"][0], before)
             return
         if resp is not None and resp.status == 409:
             logger.warning("Robot: 409 (ya hay una ruta en ejecución) -- no se reintenta: %s", resp.body[:200])
@@ -610,6 +689,69 @@ class RouteDispatcher:
         else:
             reason = f"código inesperado {resp.status}"
         self.on_failure(f"paso fallido ({reason})")
+
+    # -- verificación de ruedas (solo modo real) --
+    def _interrupted(self) -> bool:
+        with self._cv:
+            return self._blocked or self._closed
+
+    def _pause(self, seconds: float) -> bool:
+        """Espera `seconds` o hasta un PARAR/cierre; True si fue interrumpida."""
+        with self._cv:
+            self._cv.wait_for(lambda: self._blocked or self._closed, timeout=seconds)
+            return self._blocked or self._closed
+
+    def _verification_failed(self, problem: str) -> None:
+        if self._interrupted():
+            logger.warning("Robot: verificación del paso interrumpida por PARAR (sin fallo de rueda): %s", problem)
+            return
+        logger.error("Robot: VERIFICACIÓN DE RUEDAS FALLIDA: %s", problem)
+        self.on_failure(f"verificación de ruedas: {problem}")
+
+    def _read_positions(self, when: str) -> Optional[Dict[str, int]]:
+        resp = self.log.send(self.transport, "GET", PATH_STATUS)
+        if resp is None:
+            positions, problem = None, "sin respuesta"
+        else:
+            positions, problem = read_wheel_positions(resp.status, resp.body, self.verify_cfg)
+        if problem:
+            self._verification_failed(f"/status {when}: {problem}")
+            return None
+        return positions
+
+    def _verify_step(self, paso: dict, before: Dict[str, int]) -> None:
+        cfg = self.verify_cfg
+        deadline = time.monotonic() + cfg.verificacion_espera_s
+        while True:
+            if self._interrupted():
+                logger.warning("Robot: verificación del paso interrumpida por PARAR")
+                return
+            resp = self.log.send(self.transport, "GET", PATH_ESTADO)
+            ejecutando = None if resp is None else parse_ejecutando(resp.status, resp.body)
+            if ejecutando is False:
+                break
+            if ejecutando is None:
+                body = "sin respuesta" if resp is None else f"{resp.status} {resp.body[:200]}"
+                self._verification_failed(f"/estado_ejecucion ilegible tras el paso: {body}")
+                return
+            if time.monotonic() >= deadline:
+                self._verification_failed(f"/estado_ejecucion sigue en ejecutando:true tras "
+                                          f"{cfg.verificacion_espera_s:.1f}s")
+                return
+            if self._pause(cfg.sondeo_parada_s):
+                logger.warning("Robot: verificación del paso interrumpida por PARAR")
+                return
+        after = self._read_positions("después del paso")
+        if after is None:
+            return
+        if self._interrupted():  # el PARAR pudo frenar las ruedas antes de esta lectura
+            logger.warning("Robot: verificación del paso interrumpida por PARAR")
+            return
+        ok, detail = check_wheel_deltas(before, after, paso, cfg)
+        if ok:
+            logger.info("Robot: paso verificado: %s", detail)
+        else:
+            self._verification_failed(detail)
 
 
 # --- PARAR: hilo propio, conexión nueva, vigilancia hasta confirmar -----------------
@@ -748,7 +890,8 @@ class RobotController:
         self.illegible = 0
         self.steps_enqueued = 0  # solo para la línea de estado; no interviene en el control
         self.order_log = OrderLog()
-        self.routes = RouteDispatcher(transport_factory(), self.order_log, self._on_route_failure, threaded_routes)
+        self.routes = RouteDispatcher(transport_factory(), self.order_log, self._on_route_failure, threaded_routes,
+                                      verify_cfg=cfg)
         self.stopper = StopSupervisor(cfg, transport_factory, self.order_log, self.routes, self._on_stop_confirmed)
 
     # -- comandos locales --

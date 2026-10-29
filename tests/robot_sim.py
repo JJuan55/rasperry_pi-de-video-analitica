@@ -12,7 +12,13 @@ Servidor HTTP local (127.0.0.1, puerto efímero) que reproduce el contrato real
 - POST /stop -> {"ok": true, "stopped": [...]}: para motores, pero en una ruta en
   curso NO la cancela.
 - GET /status -> {"motors": [...], "battery": V, "sensors": [], "connected": true},
-  con outC y outD conectados y outA/outB no (configurable).
+  con outC y outD conectados y outA/outB no (configurable). Cada motor lleva
+  `position`: grados acumulados del encoder (entero, no se reinicia). Una ruta suma
+  sus grados a cada rueda de forma lineal durante `route_duration_s` (al instante si
+  es 0); /detener_ejecucion congela la posición donde esté.
+- Una rueda NO conectada no se mueve, y tampoco una de `immobile_ports`: conectada,
+  la ruta contesta ok:true y no se mueve (como outD, motor mediano, con el servicio
+  real que crea todos los motores como LargeMotor).
 - Cada petición en su propio hilo (ThreadingHTTPServer), como el servidor real.
 
 Fallas inyectables:
@@ -30,11 +36,16 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+PORTS = ("outA", "outB", "outC", "outD")
+
 
 class RobotSim:
     def __init__(self, route_duration_s: float = 0.0, connected_ports=("outC", "outD")) -> None:
         self.route_duration_s = route_duration_s
         self.connected_ports = set(connected_ports)
+        self.immobile_ports = set()
+        self.positions = {p: 0 for p in PORTS}  # posición asentada (sin el movimiento en curso)
+        self._move = None  # (inicio, duración, {puerto: grados}) de la ruta en curso
         self.process_delay = {}
         self.response_delay = {}
         self.drop_paths = set()
@@ -113,12 +124,31 @@ class RobotSim:
     def executing(self) -> bool:
         return time.monotonic() < self._executing_until
 
+    def _current_positions(self, now):
+        pos = dict(self.positions)
+        if self._move is not None:
+            start, duration, deltas = self._move
+            frac = 1.0 if duration <= 0 else min(1.0, (now - start) / duration)
+            for p, g in deltas.items():
+                pos[p] += round(g * frac)
+        return pos
+
+    def _settle(self, now):
+        self.positions = self._current_positions(now)
+        self._move = None
+
+    def current_positions(self):
+        with self._lock:
+            return self._current_positions(time.monotonic())
+
     def _apply(self, method, path, body):
         with self._lock:
-            self.applied.append((method, path, time.monotonic()))
+            now = time.monotonic()
+            self.applied.append((method, path, now))
             if method == "GET" and path == "/status":
-                motors = [{"port": p, "speed": 0, "position": 0, "connected": p in self.connected_ports}
-                          for p in ("outA", "outB", "outC", "outD")]
+                pos = self._current_positions(now)
+                motors = [{"port": p, "speed": 0, "position": pos[p], "connected": p in self.connected_ports}
+                          for p in PORTS]
                 return 200, {"motors": motors, "battery": 7.9, "sensors": [], "connected": True}
             if method == "GET" and path == "/estado_ejecucion":
                 ej = self.executing
@@ -131,11 +161,21 @@ class RobotSim:
                 self._detener = False  # detener.clear(): borra una parada anterior
                 self._total = len(pasos)
                 if pasos:
-                    self._executing_until = time.monotonic() + self.route_duration_s
+                    self._executing_until = now + self.route_duration_s
+                    self._settle(now)
+                    deltas = {}
+                    for paso in pasos:
+                        for mk, gk in (("motorIzq", "gradosIzq"), ("motorDer", "gradosDer")):
+                            port, deg = (paso.get(mk), paso.get(gk)) if isinstance(paso, dict) else (None, None)
+                            if (port in self.connected_ports and port not in self.immobile_ports
+                                    and isinstance(deg, int) and not isinstance(deg, bool)):
+                                deltas[port] = deltas.get(port, 0) + deg
+                    self._move = (now, self.route_duration_s, deltas)
                 return 200, {"ok": True, "totalPasos": len(pasos)}
             if method == "POST" and path == "/detener_ejecucion":
                 self._detener = True
                 self._executing_until = 0.0
+                self._settle(now)
                 return 200, {"ok": True}
             if method == "POST" and path == "/stop":
                 return 200, {"ok": True, "stopped": sorted(self.connected_ports)}

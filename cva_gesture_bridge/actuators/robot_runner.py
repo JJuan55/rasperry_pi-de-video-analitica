@@ -26,6 +26,8 @@ solo puede adelantar el desarme: los dos fallan hacia el lado seguro.
 Modo: ENSAYO por defecto (no abre ninguna conexión). El modo real exige --real Y
 `robot_url` en la configuración, y al arrancar exige que GET /status responda con
 outC y outD connected:true (el robot ignora sin avisar un motor no conectado).
+connected:true no garantiza que la rueda se mueva: en modo real cada paso se verifica
+con la posición de las dos ruedas (ver RouteDispatcher en robot_client.py).
 
 Uso:
     python -m cva_gesture_bridge.actuators.robot_runner --config config/robot_actuador.json \\
