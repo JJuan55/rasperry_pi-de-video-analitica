@@ -4165,3 +4165,88 @@ Pi4 (bash 5.0 o más; si falta `$EPOCHREALTIME`, se usa python3).
 - Con un 409, la prueba de parada detiene la ruta en curso aunque sea ajena.
 - El POST de ruta espera hasta 5 s.
 - `pruebas_sim.py` no forma parte de la suite de pytest.
+
+## Fase 11, Etapa 1 — verificación de las dos ruedas tras cada paso (2026-10-29, Tarea 8)
+
+Pedido por JD. Sin contacto con el robot, sin `--real`, sin tocar producción, sin commit
+ni push. Todo se probó contra el simulador en 127.0.0.1.
+
+**Motivo (medido por JD en el robot real, 2026-10-29):** outD es un motor mediano y el
+servicio del robot crea todos los motores como `LargeMotor`. Un paso con grados para
+outD responde `ok:true, totalPasos:1`, `/status` sigue diciendo `connected:true` y esa
+rueda no se mueve. outC (grande) sí se movió: +90° = oruga izquierda hacia el frente.
+`position` en `/status` son grados acumulados del encoder (entero, no se reinicia).
+
+**Qué hace ahora (solo modo real; en ENSAYO no cambia nada), en `RouteDispatcher`:**
+1. `GET /status` antes del paso: guarda `position` de outC y outD; exige además
+   `connected:true`. Si falla, el paso **no se envía**.
+2. Envía el paso y consulta `GET /estado_ejecucion` hasta `ejecutando:false`, como
+   mucho `verificacion_espera_s` (5 s).
+3. `GET /status` otra vez. Cada rueda debe moverse lo enviado (signo × grados) ±
+   máx(`verificacion_tol_grados` 10°, `verificacion_tol_frac` 15 % del esperado):
+   ±13,5° para 90°.
+4. Rueda fuera de tolerancia, dato faltante o mal formado, `/estado_ejecucion` ilegible
+   o tiempo agotado: paso fallido → PARAR, BLOQUEADO y un ERROR con el movimiento de
+   cada rueda, p. ej. `outD (derecha) se movió +0° (esperado +90° ±13.5°) FUERA DE
+   TOLERANCIA`.
+5. PARAR conserva su hilo y su conexión y no espera a la verificación; `block()`
+   despierta la espera y la verificación se corta en la siguiente consulta. Un paso
+   cortado por un PARAR del propio controlador no se informa como fallo de rueda.
+
+**Archivos modificados:** `cva_gesture_bridge/actuators/robot_client.py` (claves
+nuevas, `read_wheel_positions`, `wheel_tolerance`, `check_wheel_deltas`, verificación
+en `RouteDispatcher`); `robot_runner.py` (solo la ayuda); `tests/robot_sim.py`
+(encoders con `position` acumulada, movimiento lineal durante la ruta, el detener
+congela la posición, `immobile_ports` para una rueda que contesta ok y no se mueve);
+`tests/test_robot_client.py`; `docs/CONTRATO_ROBOT_EV3.md`; `GESTOS.md`. No se creó
+ningún archivo.
+
+**Decisiones y puntos que chocaban con la orden (informados a JD):**
+- Cinco pruebas existentes se ajustaron porque suponían que la ruta era la primera o
+  la única petición. `test_409_is_not_retried` ahora provoca el 409 con una ruta de
+  otro cliente: el segundo paso propio ya no sale mientras el primero se verifica. Lo
+  que comprueba (sin reintento, sigue ARMADO) no cambió.
+- `config/robot_actuador.json` no se tocó (fuera de `actuators/`, `tests/` y `docs/`):
+  las tres claves nuevas usan sus valores de partida.
+- Regla nueva de configuración: la tolerancia debe ser menor que `grados_paso` (si no,
+  una rueda quieta pasaría). Con los valores de partida, `grados_paso` ≤ 10 se rechaza.
+- Una sola respuesta ilegible de `/estado_ejecucion` ya es fallo, sin reintento.
+- Un 409 no se verifica (el paso no salió); sigue como antes.
+- "STOP simultáneo" se probó de dos formas: tecla `p` y palma a la vez (una sola
+  parada, sin fallo de rueda) y una parada de otro cliente a mitad del paso (sí es
+  fallo de rueda, porque el controlador no la pidió).
+
+**Riesgo sin verificar en el robot:** si justo después del POST el robot contesta
+`ejecutando:false` antes de empezar la ruta, la segunda lectura daría 0° y saldría un
+fallo falso (del lado seguro). El simulador no reproduce ese caso.
+
+**Consecuencia práctica:** mientras el servicio del robot maneje outD como
+`LargeMotor`, cada paso en modo real terminará en PARAR y BLOQUEADO. El modo real no
+podrá dar un paso completo hasta que se corrija en el robot.
+
+**Pruebas:** 17 nuevas (`WheelToleranceTests` y `WheelVerificationWithSimulatorTests`,
+25 subcasos): rueda D que contesta ok y no se mueve; rueda D desconectada entre pasos y
+durante el paso; las dos ruedas bien en las tres acciones; 11 formas de dato faltante o
+mal formado, antes y después del paso; `/status` sin respuesta; `/estado_ejecucion`
+ilegible y que nunca termina; PARAR durante la verificación; paradas simultáneas;
+parada externa. Comprobación con código roto a propósito en una copia aparte: sin
+verificación fallan 34 casos; con una verificación que ignora el PARAR fallan las dos
+pruebas de PARAR.
+
+Salida de `pytest` (suite completa, Python del entorno `.venv-fase-c2-fix`):
+```
+tests/test_detector.py ................................................  [ 23%]
+tests/test_fase_d_tools.py ...................................           [ 41%]
+tests/test_logging_setup.py ..                                           [ 42%]
+tests/test_main.py ..................                                    [ 51%]
+tests/test_robot_client.py ............................................. [ 73%]
+........................................                                 [ 93%]
+tests/test_tcp_server.py .........                                       [ 98%]
+tests/test_watchdog.py ....                                              [100%]
+
+============================= 201 passed in 49.80s =============================
+```
+
+**Pendiente:** revisión de JD; decidir si escribir las tres claves en
+`config/robot_actuador.json`; corregir en el robot el manejo de outD (motor mediano);
+comprobar en el robot el riesgo de `ejecutando:false` justo tras el POST.

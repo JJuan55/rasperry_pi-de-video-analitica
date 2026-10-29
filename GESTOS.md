@@ -69,6 +69,13 @@ propuesta tentativa anterior de esta sección.
 Retroceder queda **fuera de la v1**. Los movimientos se ejecutan de a un paso por cada
 3,0 s sostenidos (ver BITACORA.md, "Fase 11, Etapa 1").
 
+**`connected: true` en `/status` no garantiza que la rueda se mueva** (medido
+2026-10-29): outD es un motor mediano y el servicio del robot lo maneja como grande,
+así que un paso responde `ok:true` y esa rueda no se mueve. Por eso, en modo real, cada
+paso se verifica con la posición del encoder de las dos ruedas antes y después; si una
+no se movió lo esperado, el robot se para y queda bloqueado. Detalle en
+`docs/CONTRATO_ROBOT_EV3.md`.
+
 ### Domótica (Arduino) — tentativo, solo propuesta, no implementado
 
 | Gesto | Instrucción tentativa |

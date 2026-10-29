@@ -64,6 +64,15 @@ def paths(sent):
     return [(m, p) for m, p, _ in sent]
 
 
+def route_request(sim):
+    """La petición POST /ejecutar_ruta que recibió el simulador (en modo real ya no es la
+    primera: antes va GET /status de la verificación de ruedas)."""
+    return next(r for r in sim.requests if r[1] == rc.PATH_EJECUTAR)
+
+
+VERIFIED_STEP = [("GET", rc.PATH_STATUS), ("POST", rc.PATH_EJECUTAR), ("GET", rc.PATH_ESTADO), ("GET", rc.PATH_STATUS)]
+
+
 def wait_until(pred, timeout=5.0):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -390,9 +399,9 @@ class RouteWithSimulatorTests(SimTestCase):
         ctrl = self.controller(sim)
         self.step(ctrl)
         self.assertTrue(ctrl.routes.wait_idle(3.0))
-        self.assertEqual(sim.paths(), [("POST", rc.PATH_EJECUTAR)])
-        self.assertEqual(sim.requests[0][2]["pasos"][0]["gradosIzq"], 90)
-        rec = ctrl.order_log.records[0]
+        self.assertEqual(sim.paths(), VERIFIED_STEP)  # paso con verificación de ruedas
+        self.assertEqual(route_request(sim)[2]["pasos"][0]["gradosIzq"], 90)
+        rec = next(r for r in ctrl.order_log.records if r.path == rc.PATH_EJECUTAR)
         self.assertEqual(rec.status, 200)
         self.assertIsNotNone(rec.sent_wall)
         self.assertGreaterEqual(rec.elapsed_ms, 0.0)
@@ -416,14 +425,18 @@ class RouteWithSimulatorTests(SimTestCase):
         self.assertIn(("POST", rc.PATH_DETENER), sim.paths())
 
     def test_409_is_not_retried(self):
+        # El robot ya ejecuta una ruta de OTRO cliente (p. ej. ev3-paso.sh). Antes el robot
+        # se ocupaba con el primer paso del propio controlador, pero ahora ese paso queda
+        # en vuelo mientras se verifica y el segundo no llega a enviarse.
         sim = self.sim(route_duration_s=30.0)
+        other = rc.HttpRobotTransport(sim.url, 1.0)
+        self.addCleanup(other.close)
+        other.request("POST", rc.PATH_EJECUTAR, rc.build_route_payload(rc.AVANZAR, cfg()))
         ctrl = self.controller(sim)
         self.step(ctrl)
         self.assertTrue(ctrl.routes.wait_idle(3.0))
-        feed(ctrl, hold("puño_cerrado", 3.343, 3.0))
-        self.assertTrue(ctrl.routes.wait_idle(3.0))
-        self.assertEqual(sim.paths(), [("POST", rc.PATH_EJECUTAR)] * 2)
-        self.assertEqual([r.status for r in ctrl.order_log.records], [200, 409])
+        self.assertEqual(sim.paths(), [("POST", rc.PATH_EJECUTAR), ("GET", rc.PATH_STATUS), ("POST", rc.PATH_EJECUTAR)])
+        self.assertEqual([r.status for r in ctrl.order_log.records], [200, 409])  # sin reintento ni verificación
         self.assertEqual(ctrl.state, rc.ARMADO)
 
     def test_timeout_parar_never_resends(self):
@@ -459,7 +472,7 @@ class RouteWithSimulatorTests(SimTestCase):
             worst = max(worst, time.monotonic() - t0)
         self.assertLess(worst, 0.05)
         self.assertTrue(ctrl.routes.wait_idle(3.0))
-        self.assertEqual(sim.paths(), [("POST", rc.PATH_EJECUTAR)])
+        self.assertEqual(sim.paths().count(("POST", rc.PATH_EJECUTAR)), 1)
 
     def test_startup_check_of_motors(self):
         good = self.sim()
@@ -476,13 +489,13 @@ class StopWithSimulatorTests(SimTestCase):
         sim.response_delay[rc.PATH_EJECUTAR] = 2.0
         ctrl = self.controller(sim, timeout=3.0)
         self.step(ctrl)
-        self.assertTrue(wait_until(lambda: sim.paths()[:1] == [("POST", rc.PATH_EJECUTAR)], 2.0))
+        self.assertTrue(wait_until(lambda: ("POST", rc.PATH_EJECUTAR) in sim.paths(), 2.0))
         t_parar = time.monotonic()
         ctrl.observe(fr("palma_abierta", 3.3))
         self.assertEqual(ctrl.state, rc.PARANDO)
         self.assertLess(time.monotonic() - t_parar, 0.05)  # no espera a la red
         self.assertTrue(wait_until(lambda: ("POST", rc.PATH_DETENER) in sim.paths(), 1.0))
-        route_reply_at = sim.requests[0][3] + 2.0
+        route_reply_at = route_request(sim)[3] + 2.0
         detener_at = next(r[3] for r in sim.requests if r[1] == rc.PATH_DETENER)
         self.assertLess(detener_at, route_reply_at - 1.0)  # salió mucho antes de que respondiera la ruta
         self.assertTrue(ctrl.routes.in_flight)  # la ruta seguía en vuelo
@@ -496,7 +509,7 @@ class StopWithSimulatorTests(SimTestCase):
         sim.process_delay[rc.PATH_EJECUTAR] = 0.6  # la orden llega tarde al robot
         ctrl = self.controller(sim, timeout=2.0)
         self.step(ctrl)
-        self.assertTrue(wait_until(lambda: sim.paths()[:1] == [("POST", rc.PATH_EJECUTAR)], 2.0))
+        self.assertTrue(wait_until(lambda: ("POST", rc.PATH_EJECUTAR) in sim.paths(), 2.0))
         with self.assertLogs(LOGGER, level="WARNING") as logs:
             ctrl.observe(fr("palma_abierta", 3.3))
             self.assertTrue(wait_until(lambda: ctrl.stopper.confirmed.is_set(), 6.0))
@@ -546,6 +559,316 @@ class StopWithSimulatorTests(SimTestCase):
             time.sleep(1.2)
         self.assertEqual(ctrl.state, rc.PARANDO)
         self.assertTrue(any("PARADA NO CONFIRMADA" in m for m in logs.output))
+
+
+class WheelToleranceTests(unittest.TestCase):
+    """Tarea 8: cálculo puro de la verificación de ruedas y su configuración."""
+
+    PASO = {"motorIzq": "outC", "motorDer": "outD", "gradosIzq": 90, "gradosDer": 90, "potencia": 20}
+
+    def test_tolerance_is_max_of_degrees_and_fraction(self):
+        c = cfg()
+        self.assertEqual(rc.wheel_tolerance(90, c), 13.5)
+        self.assertEqual(rc.wheel_tolerance(-90, c), 13.5)
+        self.assertEqual(rc.wheel_tolerance(30, c), 10.0)
+        self.assertEqual(rc.wheel_tolerance(180, c), 27.0)
+
+    def test_deltas_within_and_outside_tolerance_and_sign(self):
+        c = cfg()
+        before = {"outC": 1000, "outD": -500}
+        ok, detail = rc.check_wheel_deltas(before, {"outC": 1090, "outD": -410}, self.PASO, c)
+        self.assertTrue(ok, detail)
+        self.assertTrue(rc.check_wheel_deltas(before, {"outC": 1103, "outD": -423}, self.PASO, c)[0])  # +13
+        ok, detail = rc.check_wheel_deltas(before, {"outC": 1090, "outD": -500}, self.PASO, c)
+        self.assertFalse(ok)
+        self.assertIn("outD (derecha) se movió +0° (esperado +90° ±13.5°) FUERA DE TOLERANCIA", detail)
+        self.assertIn("outC (izquierda) se movió +90°", detail)
+        self.assertFalse(rc.check_wheel_deltas(before, {"outC": 1076, "outD": -410}, self.PASO, c)[0])  # +76
+        giro = dict(self.PASO, gradosDer=-90)  # girar derecha: la derecha va hacia atrás
+        self.assertTrue(rc.check_wheel_deltas(before, {"outC": 1090, "outD": -590}, giro, c)[0])
+        self.assertFalse(rc.check_wheel_deltas(before, {"outC": 1090, "outD": -410}, giro, c)[0])  # sentido invertido
+
+    def test_read_wheel_positions(self):
+        c = cfg()
+        good = {"motors": [{"port": "outC", "connected": True, "position": 7, "speed": 0},
+                           {"port": "outD", "connected": True, "position": -3, "speed": 0}]}
+        self.assertEqual(rc.read_wheel_positions(200, json.dumps(good), c), ({"outC": 7, "outD": -3}, None))
+        for pos in ("7", 7.0, True, None):
+            bad = copy.deepcopy(good)
+            bad["motors"][1]["position"] = pos
+            positions, problem = rc.read_wheel_positions(200, json.dumps(bad), c)
+            self.assertIsNone(positions)
+            self.assertIn("outD", problem, msg=repr(pos))
+        dup = copy.deepcopy(good)
+        dup["motors"].append({"port": "ev3-ports:outD", "connected": True, "position": 1})
+        self.assertIn("2 veces", rc.read_wheel_positions(200, json.dumps(dup), c)[1])
+
+    def test_config_defaults_and_bounds(self):
+        c = rc.load_robot_config(CONF_FILE)  # el archivo del repo no trae estas claves: valores de partida
+        self.assertEqual((c.verificacion_espera_s, c.verificacion_tol_grados, c.verificacion_tol_frac), (5.0, 10.0, 0.15))
+        cfg(verificacion_espera_s=2.0, verificacion_tol_grados=20, verificacion_tol_frac=0.3)
+        for over in ({"verificacion_espera_s": 0.2}, {"verificacion_espera_s": 60.0},
+                     {"verificacion_tol_grados": -1}, {"verificacion_tol_frac": 1.0},
+                     {"verificacion_tol_grados": 90},  # una rueda quieta entraría en tolerancia
+                     {"grados_paso": 10}):  # 10 grados con tolerancia mínima de 10
+            with self.assertRaises(rc.RobotConfigError, msg=str(over)):
+                cfg(**over)
+
+    def test_dry_run_does_not_verify(self):
+        ctrl, sent = dry_controller()
+        ctrl.arm(0.0)
+        feed(ctrl, hold("puño_cerrado", 0.0, 3.2))
+        self.assertEqual(paths(sent), [("POST", rc.PATH_EJECUTAR)])  # ni /status ni /estado_ejecucion
+        self.assertIsNone(ctrl.routes.verify_cfg)
+
+
+class WheelVerificationWithSimulatorTests(SimTestCase):
+    """Tarea 8: verificación de las dos ruedas tras cada paso, modo real contra el simulador."""
+
+    GESTURES = {rc.AVANZAR: "puño_cerrado", rc.GIRAR_DERECHA: "dedo_pulgar", rc.GIRAR_IZQUIERDA: "dedo_menique"}
+
+    def failed_step(self, ctrl, logs_level="ERROR"):
+        """Da un paso y espera la parada; devuelve los mensajes del registro."""
+        with self.assertLogs(LOGGER, level=logs_level) as logs:
+            self.step(ctrl)
+            self.assertTrue(wait_until(lambda: ctrl.stopper.confirmed.is_set(), 6.0))
+        self.assertEqual(ctrl.state, rc.BLOQUEADO)
+        return logs.output
+
+    def test_both_wheels_ok_for_each_action(self):
+        expected = {rc.AVANZAR: (90, 90), rc.GIRAR_DERECHA: (90, -90), rc.GIRAR_IZQUIERDA: (-90, 90)}
+        for action, gesture in self.GESTURES.items():
+            with self.subTest(action=action):
+                sim = self.sim(route_duration_s=0.3)
+                ctrl = self.controller(sim)
+                with self.assertLogs(LOGGER, level="INFO") as logs:
+                    ctrl.arm(0.0)
+                    feed(ctrl, hold(gesture, 0.0, 3.2))
+                    self.assertTrue(ctrl.routes.wait_idle(3.0))
+                pos = sim.current_positions()
+                self.assertEqual((pos["outC"], pos["outD"]), expected[action])
+                self.assertEqual(ctrl.state, rc.ARMADO)
+                self.assertFalse(ctrl.stopper.active)
+                p = sim.paths()
+                self.assertEqual(p[:2], [("GET", rc.PATH_STATUS), ("POST", rc.PATH_EJECUTAR)])
+                self.assertEqual(p[-1], ("GET", rc.PATH_STATUS))
+                self.assertGreaterEqual(p.count(("GET", rc.PATH_ESTADO)), 2)  # vio ejecutando:true y luego false
+                self.assertNotIn(("POST", rc.PATH_DETENER), p)
+                self.assertTrue(any("paso verificado" in m for m in logs.output))
+                self.assertFalse(any("ERROR" in m for m in logs.output))
+
+    def test_second_step_starts_from_accumulated_encoder(self):
+        sim = self.sim()
+        ctrl = self.controller(sim)
+        self.step(ctrl)
+        self.assertTrue(ctrl.routes.wait_idle(3.0))
+        feed(ctrl, hold("puño_cerrado", 3.343, 3.0))
+        self.assertTrue(ctrl.routes.wait_idle(3.0))
+        self.assertEqual(sim.paths().count(("POST", rc.PATH_EJECUTAR)), 2)
+        self.assertEqual(sim.current_positions()["outC"], 180)  # el encoder no se reinicia
+        self.assertEqual(ctrl.state, rc.ARMADO)
+
+    def test_wheel_d_answers_ok_but_does_not_move(self):
+        sim = self.sim()
+        sim.immobile_ports.add("outD")  # motor mediano movido como LargeMotor: ok:true y quieta
+        ctrl = self.controller(sim)
+        out = self.failed_step(ctrl)
+        msg = next(m for m in out if "VERIFICACIÓN DE RUEDAS FALLIDA" in m)
+        self.assertIn("outD (derecha) se movió +0° (esperado +90° ±13.5°) FUERA DE TOLERANCIA", msg)
+        self.assertIn("outC (izquierda) se movió +90° (esperado +90° ±13.5°)", msg)
+        self.assertIn("verificación de ruedas", ctrl.state_reason)
+        self.assertEqual(route_request(sim)[2]["pasos"][0]["gradosDer"], 90)
+        self.assertEqual(sim.paths().count(("POST", rc.PATH_EJECUTAR)), 1)  # nunca se reenvía
+        self.assertIn(("POST", rc.PATH_DETENER), sim.paths())
+        feed(ctrl, hold("puño_cerrado", 4.0, 4.0))  # bloqueado: hace falta re-armar
+        self.assertEqual(sim.paths().count(("POST", rc.PATH_EJECUTAR)), 1)
+
+    def test_wheel_d_disconnected_mid_session_between_steps(self):
+        sim = self.sim()
+        ctrl = self.controller(sim)
+        self.step(ctrl)
+        self.assertTrue(ctrl.routes.wait_idle(3.0))
+        self.assertEqual(ctrl.state, rc.ARMADO)
+        sim.connected_ports.discard("outD")
+        with self.assertLogs(LOGGER, level="ERROR") as logs:
+            feed(ctrl, hold("puño_cerrado", 3.343, 3.0))
+            self.assertTrue(wait_until(lambda: ctrl.stopper.confirmed.is_set(), 6.0))
+        self.assertTrue(any("/status antes del paso: el motor outD no está conectado" in m for m in logs.output))
+        self.assertEqual(sim.paths().count(("POST", rc.PATH_EJECUTAR)), 1)  # el segundo paso no salió
+        self.assertEqual(ctrl.state, rc.BLOQUEADO)
+
+    def test_wheel_d_disconnected_during_the_step(self):
+        sim = self.sim(route_duration_s=0.3)
+        original = sim._apply
+
+        def unplug_on_route(method, path, body):
+            if path == rc.PATH_EJECUTAR:
+                sim.connected_ports.discard("outD")  # se suelta el cable al empezar el paso
+            return original(method, path, body)
+        sim._apply = unplug_on_route
+        ctrl = self.controller(sim)
+        out = self.failed_step(ctrl)
+        self.assertTrue(any("/status después del paso: el motor outD no está conectado" in m for m in out))
+        self.assertEqual(sim.paths().count(("POST", rc.PATH_EJECUTAR)), 1)
+
+    def _mangle_status(self, sim, nth, mangle):
+        """La `nth` respuesta de /status (1 = antes del paso, 2 = después) pasa por `mangle`."""
+        original = sim._apply
+        calls = []
+
+        def apply(method, path, body):
+            status, obj = original(method, path, body)
+            if path == rc.PATH_STATUS:
+                calls.append(1)
+                if len(calls) == nth:
+                    return mangle(status, obj)
+            return status, obj
+        sim._apply = apply
+
+    @staticmethod
+    def _motor(obj, port):
+        return next(m for m in obj["motors"] if m["port"] == port)
+
+    def test_missing_or_malformed_status_data(self):
+        def set_pos(port, value):
+            def f(st, obj):
+                self._motor(obj, port)["position"] = value
+                return st, obj
+            return f
+
+        def drop_key(port, key):
+            def f(st, obj):
+                del self._motor(obj, port)[key]
+                return st, obj
+            return f
+
+        def drop_motor(st, obj):
+            obj["motors"] = [m for m in obj["motors"] if m["port"] != "outD"]
+            return st, obj
+
+        def dup_motor(st, obj):
+            obj["motors"].append(dict(self._motor(obj, "outD")))
+            return st, obj
+
+        cases = {
+            "position texto": (set_pos("outD", "90"), "'position' de outD ilegible"),
+            "position decimal": (set_pos("outC", 90.0), "'position' de outC ilegible"),
+            "position booleana": (set_pos("outD", True), "'position' de outD ilegible"),
+            "position null": (set_pos("outC", None), "'position' de outC ilegible"),
+            "sin position": (drop_key("outD", "position"), "'position' de outD ilegible"),
+            "sin connected": (drop_key("outC", "connected"), "el motor outC no está conectado"),
+            "sin outD": (drop_motor, "no informa el motor outD"),
+            "outD repetido": (dup_motor, "2 veces el motor outD"),
+            "motors no es lista": (lambda st, obj: (st, dict(obj, motors={})), "sin lista 'motors'"),
+            "cuerpo no es objeto": (lambda st, obj: (st, "basura"), "/status ilegible"),
+            "código 500": (lambda st, obj: (500, obj), "código 500"),
+        }
+        for nth, when, routes_sent in ((1, "antes del paso", 0), (2, "después del paso", 1)):
+            for name, (mangle, expected) in cases.items():
+                with self.subTest(caso=name, lectura=when):
+                    sim = self.sim()
+                    self._mangle_status(sim, nth, mangle)
+                    ctrl = self.controller(sim)
+                    out = self.failed_step(ctrl)
+                    msg = next(m for m in out if "VERIFICACIÓN DE RUEDAS FALLIDA" in m)
+                    self.assertIn(f"/status {when}", msg)
+                    self.assertIn(expected, msg)
+                    self.assertEqual(sim.paths().count(("POST", rc.PATH_EJECUTAR)), routes_sent)
+
+    def test_status_without_response_before_the_step(self):
+        sim = self.sim()
+        sim.drop_paths.add(rc.PATH_STATUS)
+        ctrl = self.controller(sim, timeout=0.3)
+        out = self.failed_step(ctrl)
+        self.assertTrue(any("/status antes del paso: sin respuesta" in m for m in out))
+        self.assertNotIn(("POST", rc.PATH_EJECUTAR), sim.paths())
+
+    def test_estado_malformed_after_the_step(self):
+        sim = self.sim()
+        original = sim._apply
+
+        def bad_estado(method, path, body):
+            st, obj = original(method, path, body)
+            if path == rc.PATH_ESTADO and not ctrl.stopper.active:  # solo la consulta de la verificación
+                obj = {"ejecutando": "no"}
+            return st, obj
+        sim._apply = bad_estado
+        ctrl = self.controller(sim)
+        out = self.failed_step(ctrl)
+        self.assertTrue(any("/estado_ejecucion ilegible tras el paso" in m for m in out))
+
+    def test_estado_that_never_finishes(self):
+        sim = self.sim(route_duration_s=30.0)
+        ctrl = self.controller(sim, verificacion_espera_s=0.5)
+        t0 = time.monotonic()
+        out = self.failed_step(ctrl)
+        self.assertTrue(any("/estado_ejecucion sigue en ejecutando:true tras 0.5s" in m for m in out))
+        self.assertLess(time.monotonic() - t0, 4.0)
+        self.assertFalse(sim.executing)  # el PARAR canceló la ruta
+        self.assertEqual(sim.paths().count(("POST", rc.PATH_EJECUTAR)), 1)
+
+    def _in_verification(self, sim):
+        return wait_until(lambda: ("GET", rc.PATH_ESTADO) in sim.paths(), 3.0)
+
+    def test_parar_during_verification_is_immediate_and_not_a_wheel_failure(self):
+        sim = self.sim(route_duration_s=2.0)
+        ctrl = self.controller(sim)
+        with self.assertLogs(LOGGER, level="WARNING") as logs:
+            self.step(ctrl)
+            self.assertTrue(self._in_verification(sim))
+            t_parar = time.monotonic()
+            ctrl.observe(fr("palma_abierta", 3.3))
+            self.assertLess(time.monotonic() - t_parar, 0.05)  # observe no espera a la verificación
+            self.assertTrue(wait_until(lambda: ("POST", rc.PATH_DETENER) in sim.paths(), 1.0))
+            detener_at = next(r[3] for r in sim.requests if r[1] == rc.PATH_DETENER)
+            self.assertLess(detener_at - t_parar, 0.2)  # sale por su conexión, sin esperar
+            self.assertTrue(wait_until(lambda: not ctrl.routes.in_flight, 1.0))  # la verificación se corta
+            self.assertTrue(wait_until(lambda: ctrl.stopper.confirmed.is_set(), 6.0))
+        self.assertTrue(any("verificación del paso interrumpida por PARAR" in m for m in logs.output))
+        self.assertFalse(any("VERIFICACIÓN DE RUEDAS FALLIDA" in m for m in logs.output))
+        self.assertFalse(any("ERROR" in m for m in logs.output))
+        self.assertIn("palma_abierta", ctrl.state_reason)  # el motivo es el PARAR, no una rueda
+        self.assertEqual(ctrl.state, rc.BLOQUEADO)
+        self.assertLess(sim.current_positions()["outC"], 90)  # la ruta quedó cortada
+
+    def test_simultaneous_stops_during_verification(self):
+        # Tecla p y palma a la vez, desde dos hilos, mientras se verifica: una sola parada
+        # y ningún fallo de rueda.
+        sim = self.sim(route_duration_s=2.0)
+        ctrl = self.controller(sim)
+        with self.assertLogs(LOGGER, level="WARNING") as logs:
+            self.step(ctrl)
+            self.assertTrue(self._in_verification(sim))
+            go = threading.Barrier(2)
+            th = [threading.Thread(target=lambda: (go.wait(), ctrl.manual_stop("tecla p"))),
+                  threading.Thread(target=lambda: (go.wait(), ctrl.observe(fr("palma_abierta", 3.3))))]
+            for t in th:
+                t.start()
+            for t in th:
+                t.join(2.0)
+            self.assertTrue(wait_until(lambda: ctrl.stopper.confirmed.is_set(), 6.0))
+        self.assertEqual(ctrl.stopper.starts, 1)
+        self.assertFalse(any("VERIFICACIÓN DE RUEDAS FALLIDA" in m for m in logs.output))
+        self.assertEqual(ctrl.state, rc.BLOQUEADO)
+
+    def test_external_stop_during_verification_is_a_wheel_failure(self):
+        # Otro cliente (p. ej. ev3-parar.sh) detiene el robot a mitad del paso: el
+        # controlador no pidió esa parada, así que la rueda corta es un paso fallido.
+        sim = self.sim(route_duration_s=2.0)
+        ctrl = self.controller(sim)
+        other = rc.HttpRobotTransport(sim.url, 1.0)
+        self.addCleanup(other.close)
+        with self.assertLogs(LOGGER, level="ERROR") as logs:
+            self.step(ctrl)
+            self.assertTrue(self._in_verification(sim))
+            time.sleep(0.4)
+            other.request("POST", rc.PATH_DETENER)
+            other.request("POST", rc.PATH_STOP)
+            self.assertTrue(wait_until(lambda: ctrl.stopper.confirmed.is_set(), 6.0))
+        msg = next(m for m in logs.output if "VERIFICACIÓN DE RUEDAS FALLIDA" in m)
+        self.assertIn("outC (izquierda)", msg)
+        self.assertIn("FUERA DE TOLERANCIA", msg)
+        self.assertEqual(ctrl.state, rc.BLOQUEADO)
 
 
 class DiagParserTests(unittest.TestCase):
