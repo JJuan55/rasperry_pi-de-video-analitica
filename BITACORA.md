@@ -4106,3 +4106,62 @@ llegan al bridge, no es que la Pi los lea tarde. No se sabe todavía en qué tra
 **Pendiente:** resolver la caída de fps antes del modo real; definir si mostrar un
 gesto cuenta como "actividad" para el desarme por inactividad (hoy solo cuentan los
 pasos).
+
+## Fase 11, Etapa 0 — herramientas manuales del robot, prueba SIN gestos (2026-10-28, Tarea 11)
+
+Rama `robot-etapa0-herramientas`, creada desde `cva-robot-actuador` (`244b8f7`), en un
+worktree aparte (`~/video_analitica/cva-pi-repo-etapa0`) para no tocar el que usa el
+lanzador de ensayos. Solo archivos nuevos en `tools/etapa0_robot/`; ningún archivo
+existente modificado. Sin contacto con el robot ni con su red: todo se probó contra el
+simulador en 127.0.0.1. Producción intacta. Esta entrada y los archivos quedan **sin
+commit** hasta la revisión de JD.
+
+| Archivo | Qué hace |
+|---|---|
+| `ev3-paso.sh` | Un paso (`avanzar`, `izquierda`, `derecha`). Topes duros: grados 1–180 (90 por defecto), potencia 1–30 (20); fuera de rango es error, no se recorta. Antes de mover: `/status` (batería; outC y outD con `connected:true`) y `/estado_ejecucion`; confirmación escrita SI; otra vez `/estado_ejecucion` justo antes de enviar. Exige `ok:true` y `totalPasos:1`. Sin respuesta: no reintenta, consulta el estado y avisa. `--ensayo`: imprime lo que enviaría, sin conectar |
+| `ev3-parar.sh` | `/detener_ejecucion` (hasta 3 intentos, 0,2 s entre ellos, hasta recibir `ok:true`) y vigila `/estado_ejecucion` hasta ver `ejecutando:false` dos veces seguidas (máx. 10 s). Sin confirmación y sin `/status`. Dice los ms; código 0 solo si la parada quedó confirmada |
+| `ev3-prueba-parada.sh` | Con la misma confirmación: una ruta de hasta 4 pasos de 180° a potencia 20, espera 1,0 s y para con el mismo mecanismo. Lee `/status` antes de parar, a +0,3 s y +1,0 s, al terminar la parada y 3 s después. Resultado: PARÓ en X ms, NO PARÓ (con motivo, incluido REANUDÓ) o PRUEBA NO VÁLIDA (la ruta no se aceptó; igual se para). Registro en `~/robot_pruebas/`, sin la URL |
+| `ev3-comun.sh` | Funciones comunes, incluido el mecanismo de parada que usan los dos anteriores |
+| `README.md` | Uso, configuración de la URL, comando `scp` a la Pi4 (no ejecutado) y hoja de la prueba física |
+| `pruebas/pruebas_sim.py` | 43 casos contra una subclase del simulador (`tests/robot_sim.py`, sin modificarlo) con velocidad y posición en `/status` y fallas añadidas |
+
+Solo bash, curl y python3 de la biblioteca estándar. No importan nada de
+`cva_gesture_bridge/`. Solo usan rutas del contrato: `GET /status`,
+`GET /estado_ejecucion`, `POST /ejecutar_ruta` y `POST /detener_ejecucion`. La URL sale de
+`--url`, `EV3_URL` o `~/.ev3_url`, sin valor por defecto; nunca se imprime, y curl va en
+modo silencioso porque sus mensajes de error incluyen la dirección.
+
+**Pruebas:** 43 de 43 casos cumplen. Cubren: caso normal, topes (grados 181, 0 y 90.5;
+potencia 31; pasos 0 y 5), sin URL, URL inválida, precedencia de la URL, ruta en curso,
+409, respuesta que no llega y respuesta que tarda más de 5 s (un solo POST, sin
+reintento), `totalPasos` 0, confirmación distinta de "SI", motor no conectado, parada que
+tarda 1,5 s, parada que nunca se confirma, robot caído, parada que se reanuda, y
+`--ensayo` sin abrir conexiones (el simulador no recibe nada y un `curl` falso puesto
+primero en el PATH no se ejecuta). En todos, ni la salida ni el registro contienen la
+dirección. `shellcheck` no está instalado: solo se pasó `bash -n`.
+
+**Correcciones durante el trabajo:**
+- El `date` de esta Pi (coreutils en Rust) no respeta `%3N`. La hora se calcula con
+  `$EPOCHREALTIME` de bash.
+- Leer el JSON con python3 en cada consulta de `/estado_ejecucion` sumaba ~50 ms por
+  lectura. Una parada instantánea medía ~266 ms en el simulador. El bucle de vigilancia
+  lee el campo con una expresión regular de bash: ahora ~190 ms, que es el mínimo con dos
+  lecturas y 0,1 s entre consultas.
+- El primer criterio de "paró" exigía velocidad 0 a +1,0 s. Marcaba NO PARÓ a un robot
+  que sí para, aunque tarde más. Se cambió: velocidad 0 al terminar la parada y sin
+  moverse en los 3 s siguientes. El objetivo de menos de 1 s se indica aparte.
+- REANUDÓ se marca cuando una lectura vio las ruedas quietas y otra posterior las ve
+  moverse, para no confundirlo con un robot que nunca paró.
+
+**No probado (requiere el robot real):** formato y unidades reales de `/status`, tiempos
+reales de parada y freno, sentido de giro de cada rueda, y versiones de bash y curl en la
+Pi4 (bash 5.0 o más; si falta `$EPOCHREALTIME`, se usa python3).
+
+**Pendiente de decisión de JD:**
+- `--ensayo` no pide URL ni confirmación.
+- "Repite hasta 3 veces" se interpretó como reintentar hasta recibir `ok:true`.
+- No se manda `/stop`.
+- La tolerancia de posición es de 5°, sin calibrar.
+- Con un 409, la prueba de parada detiene la ruta en curso aunque sea ajena.
+- El POST de ruta espera hasta 5 s.
+- `pruebas_sim.py` no forma parte de la suite de pytest.
