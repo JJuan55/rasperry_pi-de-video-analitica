@@ -3410,3 +3410,784 @@ Salida literal de `pytest -q`:
 ............................................                             [100%]
 116 passed in 8.44s
 ```
+
+## Fase 11, Etapa 1 — actuador del robot EV3 en ENSAYO (2026-10-27, rama `cva-robot-actuador`)
+
+Worktree nuevo `~/video_analitica/cva-pi-repo-robot`, rama `cva-robot-actuador`,
+creada desde `origin/main` en `3064c7c` (PR #5). Para tenerla al día se hizo
+`git fetch`, que solo actualiza referencias: `origin/main` pasó de `993d0ea` a
+`3064c7c`. A la rama se le quitó el upstream (`git branch --unset-upstream`) para
+que un `git push` sin argumentos no pueda apuntar a `main`.
+
+**Sin contacto con el robot real, sin tocar producción.** No se tocó la detección,
+el estabilizador ni el contrato Pi->cliente: `main.py`, `detector.py` y
+`tcp_server.py` siguen sin cambios.
+
+### Tasklist
+- [x] A. Cliente del robot: configuración, topes duros, sostenimiento, PARAR con
+  cerrojo, armado por teclado, HTTP con la biblioteca estándar y modo ENSAYO por
+  defecto.
+- [x] B. Actuador simulado con retrasos, respuestas perdidas y caída total.
+- [x] C. Pruebas: 40 nuevas, más las 116 existentes, todo en verde.
+- [x] D. Propuestas, sin aplicar: cerrar la escucha en `0.0.0.0` y cómo correr el
+  modo real en la Etapa 2.
+- [ ] **Pendiente:** verificar el contrato real del servicio del robot. El archivo
+  `claude/CVA_robot-ev3_main_py_respaldo.md` no está en la Pi ni en ninguna rama del
+  repositorio.
+- [ ] **Pendiente, decisión de JD:** la regla de sostenimiento sobre el gesto
+  *confirmado* se cumple con muy poca mano real (ver "Hallazgo" abajo).
+
+### Archivos
+- `cva_gesture_bridge/actuators/robot_client.py`: configuración validada; topes
+  duros en el código (`HARD_MAX_DEGREES_PER_STEP=180`, `HARD_MAX_POWER=30` y un
+  piso `HARD_MIN_STEP_INTERVAL_S=1.0` para el mínimo configurable entre pasos);
+  `HoldTracker`; `DryRunTransport`/`HttpRobotTransport`; `OrderDispatcher` y
+  `RobotController` (estados DESARMADO/ARMADO/BLOQUEADO).
+- `cva_gesture_bridge/actuators/robot_runner.py`: proceso en primer plano con
+  teclas `a`/`d`/`p`/`q`. Lee los gestos confirmados del registro del bridge (solo
+  lectura): `--seguir` en vivo o `--reproducir` una copia (esta última solo en
+  ENSAYO).
+- `config/robot_actuador.json`: mapeo (palma=PARAR, puño=AVANZAR,
+  pulgar=GIRAR_DERECHA, meñique=GIRAR_IZQUIERDA), 90°, potencia 20, outC/outD,
+  3,0 s / 3,0 s / hueco 1,0 s, `min_confianza` 0,75 (el mismo valor que
+  `reference/config/robot.json`) y `robot_url: null`.
+- `tests/robot_sim.py`: actuador simulado (solo para pruebas).
+- `tests/test_robot_client.py`: 40 pruebas.
+
+### Decisiones
+- **PARAR** no exige sostenimiento ni confianza mínima (parar de más es seguro),
+  vale en cualquier estado y se envía una sola vez por aparición (sostener la palma
+  no repite la parada). Manda `/detener_ejecucion` y luego `/stop`, y deja el
+  estado BLOQUEADO.
+- **Una orden en vuelo:** un paso que llega con otro en vuelo se descarta, no se
+  encola. La parada tiene prioridad: anula el paso pendiente aún no enviado y, si
+  hay uno en vuelo, sale en cuanto ese responda o venza su timeout. El peor caso es
+  `timeout_http_s` + la parada. El estado queda BLOQUEADO al instante, sin esperar
+  a la red.
+- **Errores:** ante un timeout, una respuesta perdida, una conexión rechazada o un
+  código inesperado, el estado pasa a BLOQUEADO, se consulta `GET
+  /estado_ejecucion` y se manda la parada. El paso nunca se reenvía. Un 409 no se
+  reintenta y no bloquea.
+- **Conexión HTTP:** se reutiliza solo si se usó en los últimos 5 s. Así se evita
+  estrenar una orden con una conexión que el servidor ya cerró, lo que daría una
+  parada falsa.
+- **Al re-armar** hay que volver a sostener desde cero. El desarme por
+  inactividad (60 s sin armado ni paso) también manda la parada.
+- **Modo real:** exige `--real` Y `robot_url`, y hace `GET /status` al
+  arrancar; si falla, no arranca. Con URL pero sin `--real` sigue en ENSAYO.
+- **Contrato no verificado:** los nombres de campo del cuerpo de `/ejecutar_ruta`
+  (`gradosIzq`, `gradosDer`, `potencia`) son una suposición, aislada en
+  `build_route_payload()`.
+
+### Hallazgo: el sostenimiento del gesto *confirmado* no prueba que la mano siga ahí
+El gesto confirmado sigue vigente ~2,3–2,9 s después de que la mano se va: es la
+histéresis del estabilizador, 16 o 20 cuadros. Medido sobre las copias
+archivadas del 13/10 (batería, casos difíciles y repetición guiada):
+
+```
+periodos confirmados: 68; con >= 3,0 s confirmados (darían >=1 paso): 31
+de esos, con mano real (crudo==confirmado) < 3,0 s: 24
+  casos_dificiles  dedo_pulgar    confirmado  4.50 s | con evidencia cruda  0.14 s
+  casos_dificiles  dedo_pulgar    confirmado  3.56 s | con evidencia cruda  0.74 s
+  repeticion_guia  dedo_menique   confirmado  3.12 s | con evidencia cruda  0.85 s
+```
+
+Es decir, un paso puede salir con **~0,1–1 s de mano real**. La regla se dejó
+como se pidió (gesto confirmado). La alternativa recomendada es sumar solo los
+intervalos en los que el candidato crudo de **ambos** cuadros coincide con el
+confirmado. Requiere pasar también el gesto crudo al controlador (el registro
+`[diag]` ya lo trae). **Decisión de JD.**
+
+### Ensayo con datos reales (solo lectura, sin red)
+`robot_runner --reproducir --armar-al-inicio` sobre las copias del 13/10: 0
+líneas ilegibles en las tres. El primer `palma_abierta` bloquea, y desde ahí no
+sale ningún movimiento sin re-armar. Caso 5: ninguna orden. Los "paso descartado
+(orden en vuelo)" de la batería son un efecto de reproducir acelerado (miles de
+cuadros en milisegundos): no representan lo que pasaría en tiempo real.
+
+### Otras notas
+- `GESTOS.md` tiene un mapeo de robot "tentativo, solo propuesta" distinto del de
+  esta tarea (allí palma=avanzar y puño=detener). No se editó; queda a decisión de
+  JD actualizarlo.
+- El hueco de `module_id` (CLAUDE.md §4.5) sigue abierto. En la Etapa 1, armar
+  por teclado equivale a declarar que la sesión es de robot.
+
+Salida literal de `pytest -q` (suite completa, rama `cva-robot-actuador`):
+```
+........................................................................ [ 92%]
+............                                                             [100%]
+156 passed in 15.61s
+```
+
+## Fase 11, Etapa 1 — correcciones de la revisión (2026-10-27, misma rama)
+
+JD corrigió dos cosas de su propio pedido anterior: (1) el contrato del robot no estaba
+disponible y ahora está en `docs/CONTRATO_ROBOT_EV3.md`; (2) el diseño aprobado
+(2026-10-23) suma tiempo con el gesto **crudo** del cuadro actual, no con el
+confirmado. Sin contacto con el robot, sin tocar producción, sin push.
+
+### Tasklist
+- [x] Contrato real: cuerpo `{"pasos":[...]}`, `totalPasos` exigido, 409, `/status`
+  con outC y outD conectados. Simulador y pruebas con los cuerpos exactos.
+- [x] A. Sostenimiento con evidencia cruda: 3 de los últimos 4 cuadros, configurable,
+  más la regla de huecos. Medido sobre las copias del 13/10.
+- [x] B. PARAR en su propio hilo y por una conexión nueva, con estado PARANDO y
+  vigilancia de `/estado_ejecucion`, alarma y sin reanudar nunca solo.
+- [x] C. `totalPasos`, comprobación de motores en modo real, y PARAR antes de salir
+  con SIGINT, SIGTERM o SIGHUP.
+- [x] D. Base de tiempo de `--seguir` = la hora de la línea del registro.
+- [x] E. `GESTOS.md`: mapeo v1 vigente; retroceder queda fuera de la v1.
+- [x] F. `docs/CONTRATO_ROBOT_EV3.md`, sin direcciones ni credenciales.
+
+### A. Sostenimiento: medición sobre las copias del 13/10
+Se tomaron las copias archivadas de la batería, los casos difíciles y la
+repetición guiada. Se reprodujeron con el `HoldTracker` nuevo (3 de 4, hueco
+< 1,0 s) y con la regla vieja (confirmado). "Mano real" = intervalos entre dos
+cuadros con el crudo igual al gesto en ambos, confianza ≥ 0,75 y separación < 1 s.
+
+```
+=== SOLO gestos de movimiento (puño, pulgar, meñique) ===
+periodos confirmados: 47
+regla VIEJA (confirmado): pasos 57; pasos con < 3,0 s de mano real acumulada en el periodo al dar el paso: 16
+    casos_dificiles  dedo_pulgar    mano real 0.40 s (periodo 8.58 s)
+    casos_dificiles  dedo_pulgar    mano real 0.74 s (periodo 3.44 s)
+    repeticion_guia  dedo_menique   mano real 0.85 s (periodo 3.01 s)
+regla NUEVA (crudo 3 de 4): pasos 37; pasos con < 3,0 s de mano real acumulada en el periodo al dar el paso: 0
+periodos con >= 3,0 s SEGUIDOS de mano real (paso legítimo): 5; sin paso con la regla nueva: 0
+caso dedo_pulgar: periodo 4.47 s, mano real 0.14 s -> pasos regla vieja 0, regla nueva 0
+```
+
+Con los 4 gestos tratados como si todos movieran: regla vieja, 87 pasos, 25 con
+menos de 3 s; regla nueva, 46 pasos, **0** con menos de 3 s; 7 legítimos, ninguno
+perdido.
+
+**Corrección de lo que escribí en la sección anterior.** El caso
+`dedo_pulgar` de "4,5 s con 0,14 s de mano real" **no habría dado un paso con
+ninguna de las dos reglas**. Ese periodo (18:48:05,789 → 18:48:10,258) tuvo solo
+11 cuadros y tres huecos de 1,1 a 1,8 s, que reinician la cuenta en las dos reglas.
+En la Tarea 5 lo conté como "daría un paso" solo por durar más de 3 s, sin simular
+la regla: el ejemplo estaba mal elegido. La conclusión se mantiene con los casos
+simulados: la regla vieja da 16 pasos reales con menos de 3 s de mano (el peor con
+0,40 s) y la nueva, 0.
+
+**Detalle de la regla nueva.** El confirmado solo elige el objetivo e inicia la
+cuenta. En frío, la ventana necesita 3 cuadros crudos antes de sumar (en sesión
+real ya está llena al confirmar, porque confirmar exige 5 de 7 crudos). Con la
+tolerancia de 1 de 4, al irse la mano se suma como mucho 1 intervalo después del
+último cuadro bueno.
+
+### B. PARAR: diseño y peor caso
+- **Al instante, sin red:** el estado pasa a PARANDO y la cola de rutas queda
+  bloqueada (`RouteDispatcher.block()`): ninguna ruta nueva sale hasta re-armar.
+- **Hilo propio** (`robot-parada`) con una **conexión nueva** (`transport_factory()`):
+  `POST /detener_ejecucion` y luego `POST /stop`. No espera al paso en vuelo ni a
+  su respuesta.
+- **Vigilancia:** cada `sondeo_parada_s` (0,3 s) hace `GET /estado_ejecucion`. Con
+  `ejecutando:true`, vuelve a parar (detener + stop). Sin respuesta legible, repite
+  `/detener_ejecucion`.
+- **Termina solo cuando:** no hay ruta en vuelo (respondió o venció su plazo), han
+  pasado `margen_parada_s` (6 s) desde el último envío de ruta y hubo **dos**
+  lecturas seguidas con `ejecutando:false`. Entonces el estado pasa a BLOQUEADO (o a
+  DESARMADO si fue un desarme).
+- **Sin confirmación** después de `alarma_parada_s` (10 s): log ERROR "PARADA NO
+  CONFIRMADA", repetido cada 5 s, y sigue reintentando. No se puede re-armar
+  mientras esté en PARANDO, y nunca reanuda solo.
+- **Un segundo PARAR** durante PARANDO no crea otro hilo.
+- **Peor caso hasta que llega la primera orden de parada:** es independiente del
+  paso en vuelo. Con conexión nueva hay que contar el saludo TCP: ≈ 1 ida y vuelta +
+  1 ida. Con el ping medido por JD (13–337 ms de ida y vuelta) da ≈ 20–510 ms. Con
+  una conexión de parada ya abierta de antemano bajaría a ≈ 1 ida (≈ 7–170 ms); se
+  deja como posible mejora.
+- **Movimiento extra máximo** si la orden de ruta se perdió o llegó tarde y anuló el
+  detener: **un paso** (90° configurados, nunca más de 180° por el tope duro). La
+  vigilancia lo detecta (`ejecutando:true`) y lo vuelve a parar.
+
+### C. Verificaciones
+- `route_response_ok()` exige `ok:true` y `totalPasos` == pasos enviados. Si no, es
+  un fallo y dispara PARAR.
+- En modo real, el runner hace `GET /status` y exige outC y outD con
+  `connected:true`. Si no, no arranca (código 3) y no manda nada más.
+- El runner ejecuta PARAR antes de salir con SIGINT (Ctrl+C), SIGTERM y SIGHUP. Si
+  no logra confirmarlo en `--espera-parada-s` (10 s), sale con código 4 y ERROR.
+
+### D. Base de tiempo
+En `--seguir` y en `--reproducir`, la hora de cada cuadro es la de su línea
+`[diag]`. Esa línea se escribe cuando el bridge **terminó de procesar** el cuadro
+(lectura + inferencia, ~35–65 ms después de leerlo); la hora exacta de lectura no
+se registra. No es la hora a la que el runner lee la línea: el sondeo del archivo
+(~50 ms) no altera los intervalos. El desarme por inactividad usa `time.time()`, el
+mismo reloj de pared con que el bridge escribe sus horas. Con `--reproducir`, las
+rutas se envían en línea (sin hilo) para que el ensayo sea determinista.
+
+### Archivos de esta revisión
+- `cva_gesture_bridge/actuators/robot_client.py`: reescrito (contrato, HoldTracker
+  con crudo, RouteDispatcher, StopSupervisor, estado PARANDO).
+- `cva_gesture_bridge/actuators/robot_runner.py`: crudo por cuadro, hora del
+  registro, SIGHUP, comprobación de motores.
+- `config/robot_actuador.json`: claves nuevas `ventana_crudo`,
+  `coincidencias_crudo`, `margen_parada_s`, `sondeo_parada_s` y `alarma_parada_s`.
+- `tests/robot_sim.py`: cuerpos exactos, `detener.clear()`, retrasos antes y después
+  de aplicar, rutas que no responden y motores configurables.
+- `tests/test_robot_client.py`: 53 pruebas, estables en 8 corridas seguidas.
+- `docs/CONTRATO_ROBOT_EV3.md` (nuevo) y `GESTOS.md` (solo texto).
+
+Salida literal de `pytest -q` (suite completa):
+```
+........................................................................ [ 85%]
+.........................                                                [100%]
+169 passed in 24.14s
+```
+
+## Diagnóstico de fluidez, exposición del puerto y herramientas fuera del repo (2026-10-23 a 2026-10-27)
+
+Trabajo de solo lectura sobre producción (sin reiniciar el servicio, sin cambiar
+niveles de log, sin sudo). Las herramientas viven en `~/soak/` de la Pi, **fuera del
+repositorio**, y se registran aquí para dejar constancia. Ninguna se importa desde el
+paquete.
+
+### Herramientas en `~/soak/` (43 pruebas unittest, con datos de muestra)
+| Archivo | Para qué |
+|---|---|
+| `soak_monitor.py` | Muestra cada N s (CSV): PID y reinicios del servicio, CPU/RSS/hilos/archivos del bridge, CPU y memoria del sistema, temperatura, frecuencia, throttling (vacío: el usuario no tiene acceso a `/dev/vcio`), Recv-Q/Send-Q/RTT/retransmisiones del 8766 con `ss`, y el costo del propio monitor |
+| `soak_summary.py` | Resumen del CSV: estadísticas, pendientes por regresión (`--descartar-min`), bloques de 10 min, top 5 de CPU, racha de Recv-Q > 0 |
+| `journal_frames.py` | fps y huecos por conexión a partir de una copia del journal (`-o short-iso-precise`), con aviso si hay líneas `Suppressed` de journald |
+| `recvq_probe.py` | Cada 50 ms lee `/proc/net/tcp` (sin lanzar procesos) y registra la `rx_queue` del socket del bridge (8766) |
+| `gaps_vs_recvq.py` | Cruza los huecos del journal con la sonda: "la Pi leyó tarde" (datos esperando en el socket) / "los datos no habían llegado" / "dudoso" / "sin muestras" |
+
+`recvq_probe.py` y `gaps_vs_recvq.py` **todavía no se ejecutaron contra producción**.
+
+### Ensayo de 60 s del monitor (2026-10-27, 14:02:05–14:03:05, cliente conectado)
+31/31 muestras, sin errores salvo el aviso esperado de `vcgencmd`. Costo del
+monitor: 0,1 % de CPU de promedio y 17,8 MB. Bridge a 7 fps: CPU 24,9 % de
+promedio (28,5 % máx) de un núcleo, RSS 227,5–227,6 MB, 11 archivos abiertos, 0
+reinicios, temperatura máx 56,8 °C, frecuencia 2000–2400 MHz, Recv-Q 0 en todas las
+muestras, 0 retransmisiones. Las pendientes de 60 s no son significativas. La
+prueba de 3 h sigue pendiente.
+
+### Hallazgos sobre la fluidez de los cuadros
+- **El registro no trae tiempos de proceso por cuadro.** `latencia_ms` es el tiempo
+  entre dos lecturas consecutivas y `fps_real` es un promedio acumulado. El "~35-65 ms"
+  de `main.py` es un comentario de una medición vieja.
+- **Después de un hueco llega una ráfaga.** En la sesión del 23/10 (10:55–11:01),
+  tras 65 de los 66 huecos de más de 500 ms, los 3 cuadros siguientes llegaron cada
+  ~37 ms (mediana), contra ~125 ms normales. Los cuadros se acumularon en algún punto
+  y la Pi los procesa con margen de sobra. **Dónde** se acumulan (cliente, túnel o
+  Pi) es lo que medirá `recvq_probe.py`. Línea de cierre de esa conexión:
+  `total_frames=2401, total_bytes=14227996`.
+- **Conexiones con cuadros desde el 19/10** (journal, solo lectura; 21 conexiones
+  aceptadas, 14 de ellas health checks sin cuadros, 0 líneas `Suppressed` visibles):
+
+```
+inicio              puerto   dur_s frames   fps huecos  h/min p95_ms max_ms
+2026-10-22 16:41:52  36704   891.8   6232  6.99     87    5.9    200   1192
+2026-10-22 17:27:58  34024   480.8   3356  6.98     32    4.0    214   1241
+2026-10-23 10:55:43  60756   343.6   2401  6.98    133   23.2    305   2321
+2026-10-23 14:14:32  44586  2802.8   9028  3.22   2913   62.4    985  19094
+2026-10-25 20:19:22  50834   104.3    731  7.00     41   23.6    291   2600
+2026-10-26 16:57:44  45984    48.5    341  7.01      2    2.5    213    419
+2026-10-27 14:00:34  54186   229.4   1569  6.84     25    6.5    201    737
+```
+  La sesión del **23/10 a las 14:14** fue muy degradada: 3,22 fps, 62 huecos por
+  minuto y un hueco de 19 s. Causa sin investigar.
+
+### Observaciones de seguridad (solo lectura, nada se cambió)
+- El servicio escucha en **`0.0.0.0:8766`** (`CVA_BRIDGE_HOST`, `config.py:6`) y
+  `nftables` está inactivo. Cualquier equipo de la red puede conectarse sin pasar por
+  SSH.
+- Las **231** conexiones registradas desde el 10/09 llegaron todas desde `127.0.0.1`.
+  El cliente pide el túnel hacia `127.0.0.1:8766` del servidor SSH (`bridge.rs`) y
+  las sesiones SSH entran por la Pi 4. Todo indica que el túnel termina en el sshd de
+  la Pi 5.
+- **Propuesta (sin aplicar):** `Environment=CVA_BRIDGE_HOST=127.0.0.1` en la unidad
+  del servicio y reiniciar. Requiere sudo y autorización de JD.
+  - Comprobar con `ss -tlnp` (debe salir `127.0.0.1:8766`), con
+    `nc -zv 127.0.0.1 8766`, con un intento desde otro equipo (debe ser rechazado) y
+    con una sesión real del cliente.
+  - Marcha atrás: quitar la línea y reiniciar.
+  - Pendiente confirmar en la Pi 4 que no reenvía el puerto por TCP directo.
+- El mensaje `cerrada sin datos (health check)` de `tcp_server.py:100-105` también
+  aparece cuando una sesión real cierra justo entre dos cuadros. Solo afecta al texto
+  del log.
+- `~/.ssh/authorized_keys`: 2 llaves ed25519 **sin opciones** (ni `command=`, ni
+  `restrict`, ni `permitopen`, ni `from=`). Si una es la del cliente,
+  `permitopen="127.0.0.1:8766"` la limitaría al bridge. Decisión de JD.
+
+### Modo real en la Etapa 2: recomendación
+Opción (b), proceso aparte que sigue las líneas `[diag]` del registro (ya existe como
+`robot_runner --seguir`): no toca producción, se para con `q` o una señal, y un fallo
+del actuador no afecta al bridge. La opción (a), integrarlo al bucle del bridge,
+queda para la Etapa 3 (armado desde el cliente).
+
+### Pendientes consolidados (esperan decisión o autorización de JD)
+- [ ] Revisión y aprobación de la Fase 11, Etapa 1 (rama `cva-robot-actuador`) antes
+  del PR.
+- [ ] Prueba de 3 h con `soak_monitor.py`.
+- [ ] Sesión con `recvq_probe.py` + `gaps_vs_recvq.py` para saber dónde se acumulan
+  los cuadros.
+- [ ] Investigar la sesión del 23/10 a las 14:14.
+- [ ] Cerrar `0.0.0.0:8766` y revisar las opciones de `authorized_keys`.
+- [ ] Conexión de parada abierta de antemano (bajaría el peor caso de PARAR).
+- [ ] `module_id` (CLAUDE.md §4.5).
+
+## Fase 11, Etapa 1 — revisión de JD, Tarea 7 (2026-10-27, misma rama)
+
+Sin robot real, sin tocar producción, sin push.
+
+### B. Qué prueba cubre cada caso (`tests/test_robot_client.py`)
+| Caso | Prueba(s) |
+|---|---|
+| (i) `totalPasos` distinto del enviado | `ContractTests::test_route_response_requires_ok_and_exact_total`, `RouteWithSimulatorTests::test_total_pasos_mismatch_is_failure_and_parar` |
+| (ii) 409 sin reintento | `RouteWithSimulatorTests::test_409_is_not_retried` |
+| (iii) la ruta llega DESPUÉS del PARAR | `StopWithSimulatorTests::test_ii_route_applied_after_parar_is_detected_and_stopped_again` |
+| (iv) PARAR con el robot caído | `StopWithSimulatorTests::test_robot_down_alarm_and_stays_parando` (caída total) y `test_iii_robot_not_answering_parar_keeps_retrying_with_alarm_never_resumes` (no responde a la parada) |
+| (v) SIGTERM / SIGHUP (y Ctrl+C) | `RunnerTests::test_sigterm_runs_parar_before_exit`, `test_sighup_runs_parar_before_exit`, `test_ctrl_c_runs_parar_before_exit` |
+| (vi) configuración que rebasa 180° / 30 / 1 s | `ConfigTests::test_hard_limits_cannot_be_raised_from_config` (181°, potencia 31 y 40, 0,5 s entre pasos; 180/30/1,0 justo en el tope son válidos); además `ContractTests::test_hard_limits_in_code` (configuración alterada después de validar) |
+| (vii) 3 de 4 con hueco de 0,9 s (no reinicia) y 1,1 s (reinicia) | **Nueva en esta revisión:** `HoldTrackerTests::test_three_of_four_with_gap_0_9_keeps_and_gap_1_1_resets`. Antes solo había 0,9 s y 1,0 s (`test_gaps`) |
+
+Suite: **170 pruebas** (116 + 54).
+
+### C. Propuesta, sin implementar: conexión de parada abierta de antemano
+**Objetivo:** que la primera orden de parada no pague el saludo TCP. El servidor del
+robot usa HTTP/1.1 persistente y atiende cada conexión en su propio hilo.
+
+1. **Canal de parada dedicado** (`StopChannel`), separado de la conexión de rutas.
+   - Se abre al arrancar en modo real y se exige sano para **armar**: si no se puede
+     abrir, no se arma. Así se falla cerrado.
+   - Solo transporta `GET` de latido y las órdenes de parada (`/detener_ejecucion`,
+     `/stop`), nunca rutas.
+2. **Latido barato:** cada `latido_s` (propuesta: 2 s), `GET /estado_ejecucion` por ese
+   canal.
+   - Es estado en memoria del servidor; `/status` lee motores y batería, así que es
+     más caro. Usaría `/status` solo si `/estado_ejecucion` no sirviera.
+   - Si el latido falla o vence su plazo (propuesta: 0,5 s), el canal queda "muerto"
+     y se reabre en segundo plano, con espera creciente entre intentos.
+   - Si estando ARMADO el canal sigue muerto más de `canal_muerto_max_s` (propuesta:
+     5 s), se desarma con PARAR por conexión nueva.
+   - El latido corre bajo un candado del canal, pero **PARAR nunca espera ese candado**
+     (ver 3).
+   - **Pendiente:** el plazo de inactividad keep-alive del servidor del robot. El
+     latido debe ser más frecuente que ese plazo.
+3. **PARAR con canal preabierto, en carrera y sin retraso:**
+   - (a) Si el canal está sano y libre, `POST /detener_ejecucion` por él.
+   - (b) **Al mismo tiempo**, en otro hilo, abre una conexión nueva y manda también
+     `/detener_ejecucion` (idempotente: dos paradas no hacen daño).
+   - Lo que llegue primero detiene el robot. Si la preabierta falló (reset, tubería
+     rota, conexión medio abierta que nadie detectó, o un latido en vuelo), la nueva ya
+     iba en camino: nada espera a nada.
+   - Después sigue la vigilancia actual del `StopSupervisor`, sin cambios (estado,
+     margen de 6 s, dos lecturas con `ejecutando:false`).
+4. **Cuánto baja el peor caso de la primera orden:** hoy es ≈ 1 ida y vuelta (saludo
+   TCP) + 1 ida = ≈ 1,5 RTT, es decir, ≈ 20–505 ms con un ping de 13–337 ms. Con el
+   canal sano: ≈ 1 ida = ≈ 7–170 ms (suponiendo ida ≈ vuelta). Baja ≈ 1 RTT (13–337 ms).
+   Con el canal muerto sin detectar, la carrera deja el caso igual que hoy, nunca
+   peor.
+5. **Costo:** una conexión TCP y un hilo más en el servidor del robot mientras el
+   actuador corre, más un `GET` cada 2 s. **Pendiente:** confirmar que el EV3 lo
+   tolera.
+6. **Pruebas que añadiría** (simulador con keep-alive y conteo de conexiones):
+   - PARAR con el canal sano no abre conexión TCP nueva antes del primer `detener`, y
+     el `detener` llega antes que por la vía nueva.
+   - El simulador cierra conexiones inactivas: el latido lo detecta y se reconecta.
+   - Conexión medio abierta (el simulador deja de responder por el canal sin
+     cerrarlo): PARAR llega igual por la conexión nueva, sin esperar el plazo del canal.
+   - Un latido en vuelo no retrasa a PARAR.
+   - Sin canal no se arma; con el canal muerto más de `canal_muerto_max_s` se desarma.
+   - Por el canal de parada solo pasan `GET` de latido y órdenes de parada (nunca
+     `/ejecutar_ruta`).
+   - PARAR repetido no multiplica hilos ni conexiones.
+
+### D. Sesión del 23/10, de 14:14:32 a 15:01:15 (journal, solo lectura)
+Conexión `44586`: 9028 cuadros en 2802,8 s. Bloques de 5 min:
+
+```
+bloque (5 min)         cuadros   fps huecos  >=1s s_en_huecos  max_ms
+14:14:32                  1362  4.54    287     5       137.7    2657
+14:19:32                  1081  3.60    418    14       217.5    1850
+14:24:32                   599  2.00    335    88       263.9    1809
+14:29:32                   345  1.15    340   101       299.9    2011
+14:34:32                  1125  3.75    181    68       224.4   19094
+14:39:32                  1649  5.50    193    20       152.2   18192
+14:44:32                   693  2.31    515     9       265.0    1438
+14:49:32                   403  1.34    363    73       297.0    8504
+14:54:32                  1145  3.82    231    56       180.5    2272
+14:59:32                   625  6.08     50     5        33.9    8817
+10 huecos mayores: 14:37:38,647 19.1s, 14:39:53,713 18.2s, 14:40:59,111 14.7s, 14:35:06,663 13.8s, 14:38:57,085 13.2s, 14:59:47,152 8.8s, 14:53:22,576 8.5s, 14:41:20,320 8.1s, 14:51:58,510 6.5s, 14:39:10,279 5.8s
+```
+- **Distribución:** por **rachas**, ni constante ni empeorando de forma continua. Hay
+  dos valles (1,15 fps a las 14:29 y 1,34 fps a las 14:49) con recuperaciones entre
+  medio (5,50 fps a las 14:39). Los cinco huecos de 13 a 19 s se concentran entre las
+  14:35 y las 14:41.
+- **Tamaño medio de cuadro por bloque:** 10093, 11041, 8016, 3111, 3062, 3461, 10583,
+  11844, 12301 y 11949 bytes. No acompaña a los huecos: el bloque con menos fps tuvo
+  los cuadros más pequeños.
+- **Otras líneas del servicio en ese rato:** 2 health checks (14:14:31), la conexión
+  (14:14:32), **un único** aviso del watchdog (14:35:11,630, "sin frames en 5.0s") y el
+  cierre (15:01:21,836, `total_frames=9028, total_bytes=74380751`). No hubo errores,
+  reinicios del modelo ni otras desconexiones. `NRestarts=0`.
+- **Defecto encontrado, con dato y código (no se corrigió):** en esa conexión hubo
+  cinco huecos de más de 5 s, pero el watchdog se disparó una sola vez. En
+  `cva_gesture_bridge/transport/watchdog.py` (igual en producción y en `origin/main`),
+  `feed()` solo reprograma si `self._handle is not None`, y `_fire()` deja
+  `self._handle = None`: **después del primer disparo el watchdog no se vuelve a armar
+  en esa conexión.** Importa para los fail-safes de la Fase 10. El actuador del robot
+  no depende de él: tiene su propia regla de huecos y su desarme por inactividad.
+- **Journal del sistema (térmico, memoria, Wi-Fi):** **sin permiso sin sudo.**
+  `journalctl` sin `-u` solo muestra las líneas del servicio, `journalctl -k` sale
+  vacío, `dmesg` responde "Operación no permitida" y `system.journal` es de
+  `root:systemd-journal`. **Pendiente.**
+
+### E. Línea "finalizada" de la conexión principal del 23/10 10:55
+Está en el journal:
+`2026-10-23 11:01:27,617 INFO cva_gesture_bridge.transport.tcp_server: Conexión con ('127.0.0.1', 60756) finalizada. total_frames=2401, total_bytes=14227996`
+
+Salida literal de `pytest -q` (suite completa):
+```
+........................................................................ [ 42%]
+........................................................................ [ 84%]
+..........................                                               [100%]
+170 passed in 23.98s
+```
+
+## Fase 11, Etapa 1 — estado tras el push (2026-10-27 17:33)
+
+Verificado solo con lecturas (`git ls-remote`, `git status` con `GIT_OPTIONAL_LOCKS=0`):
+
+- **Push hecho por JD:** `origin/cva-robot-actuador` = `3e00e9b`, igual que la rama
+  local (`## cva-robot-actuador...origin/cva-robot-actuador`, sin diferencias). La
+  rama quedó enlazada a su remoto.
+- **`main` sin cambios:** `origin/main` = `3064c7c`. No se abrió ni fusionó ningún PR.
+- **Producción intacta:** `rasperry_pi-de-video-analitica` sigue en `2b74314`; el
+  servicio está activo con el mismo PID (1469).
+- **Sin mediciones nuevas:** `recvq_probe.py` no se ha ejecutado contra producción y la
+  prueba de 3 h tampoco.
+
+### Esperando decisión o autorización de JD, por orden sugerido
+1. Revisión y aprobación de la Etapa 1. Después, PR `cva-robot-actuador` → `main`.
+2. Defecto del watchdog (`transport/watchdog.py`, no se vuelve a armar tras el primer
+   disparo): corregirlo ahora en una rama aparte con su prueba, o en la Fase 10.
+3. Sesión con `recvq_probe.py` + `gaps_vs_recvq.py` para saber dónde se acumulan los
+   cuadros.
+4. Prueba de 3 h con `soak_monitor.py`.
+5. Conexión de parada abierta de antemano (propuesta escrita en "Tarea 7", sin
+   implementar).
+6. Seguridad: cerrar `0.0.0.0:8766` (sudo + reinicio) y restringir las llaves SSH.
+7. Sin acceso desde aquí: journal del sistema del 23/10 de 14:14 a 15:01 y la
+   configuración de reenvío de la Pi 4.
+
+## Fase 11, Etapa 1 — preparación del ensayo en vivo (2026-10-27, Tarea 9)
+
+Solo ENSAYO (nunca `--real`). Nada se conectó al robot. Producción intacta; el
+registro del bridge solo se leyó.
+
+- **Registro que sigue el runner:**
+  `/home/david_cardenas/video_analitica/rasperry_pi-de-video-analitica/logs/cva_gesture_bridge.log`.
+  Es el descriptor 4 del servicio (PID 1469), dueño `david_cardenas`, permisos 644,
+  legible. Nivel INFO (`CVA_LOG_LEVEL=INFO` en la unidad; las líneas `[diag]` salen en
+  INFO).
+- **Lanzador fuera del repositorio:** `~/robot_ensayos/iniciar_ensayo.sh`. Crea la
+  sesión tmux `robot_ensayo` y corre el runner con `--seguir`, sin `--real`, y con
+  `tee -i` a un archivo nuevo `~/robot_ensayos/ensayo_<fecha_hora>.log`. `-i` evita que
+  Ctrl+C mate a `tee` antes de que se registre el PARAR.
+- **Prueba en seco sin cliente (18:20):**
+  - `a` arma; `d` desarma con PARAR; `p` hace PARAR y deja BLOQUEADO; `q` sale con
+    PARAR.
+  - Ctrl+C (SIGINT) y SIGTERM salen con "Señal …: PARAR y salida", parada
+    confirmada y código 0.
+  - El runner no abrió ninguna conexión TCP.
+  - Los tres archivos de salida conservan las líneas finales.
+- **Configuración local para el modo real (sin usar):** `~/robot_actuador.local.json`,
+  copia idéntica a la del repositorio, con `robot_url: null`, permisos 600. El cargador
+  la acepta y el modo real la rechaza como corresponde ("modo real sin 'robot_url'").
+- **Hallazgo:** `~` es un repositorio git vacío (rama `master` sin commits, sin remoto,
+  nada rastreado, creado el 3/09). La configuración local queda dentro de ese árbol,
+  sin rastrear. Riesgo si alguien hace `git add -A` en `~`. Decisión de JD.
+- **Propuestas sin implementar (esperan visto bueno):** (1) una línea de estado cada
+  30 s con los cuadros leídos, la hora del último cuadro, las líneas ilegibles y el
+  estado; (2) en ENSAYO, que el registro de órdenes diga "no enviada (ENSAYO)" en vez
+  de "enviada … -> 200".
+
+## Auditoría de la "Tarea 9" (2026-10-28, solo lectura) — explicación y correcciones de Claude
+
+Auditoría pedida por JD sobre lo hecho el 27/10 con la "Tarea 9" (preparación del
+ensayo en vivo). Fue de solo lectura: no se modificó, revirtió ni subió nada; no se
+tocó producción ni el robot; sin sudo. La única escritura fue la rama **local**
+`respaldo-tarea9`, que apunta a `544f41b` y no se subió.
+
+### Qué contiene el commit auditado
+`544f41b` solo agrega 32 líneas a `BITACORA.md` (la sección "preparación del ensayo
+en vivo"). No cambia código, pruebas ni configuración. Se subió a
+`origin/cva-robot-actuador` desde esta Pi el **2026-10-28 a las 12:37:24** (reflog:
+`update by push`); en el informe del 27/10 figuraba aún como pendiente de push. `main`
+sigue en `3064c7c`.
+
+### Comprobaciones, con evidencia
+- **Pruebas:** el 27/10 no se corrió pytest para ese commit (es solo documentación);
+  se hicieron las tres pruebas manuales en seco del runner. Corrida el 28/10 sobre
+  `544f41b`: `170 passed in 23.80s`.
+- **(a) ¿Peticiones al robot real?** No. `robot_url` es `null` en la configuración del
+  repo y en `~/robot_actuador.local.json`. El lanzador `~/robot_ensayos/iniciar_ensayo.sh`
+  solo menciona `--real` en comentarios. Los tres registros de ensayo dicen "en modo
+  ENSAYO" (6, 2 y 2 órdenes "ENSAYO: enviaría", 0 errores HTTP) y no contienen ninguna
+  URL. En ENSAYO el transporte (`DryRunTransport`) no tiene código de red. Claude nunca
+  tuvo la IP del robot.
+- **(b) ¿Producción, servicio o configuración modificados?** No.
+  - La carpeta de producción sigue en `2b74314`, con 0 archivos modificados. El
+    servicio tiene el mismo PID (1469, iniciado el 19/10 a las 10:09:59) y
+    `NRestarts=0`.
+  - La unidad (10/09), su `override.conf` (25/09), `.capture.env` (02/10) y
+    `config.py` (09/10) tienen fechas anteriores.
+  - En 48 h solo cambiaron `logs/` (el servicio escribiendo) y metadatos del `.git`
+    **compartido** con los worktrees: ramas, worktrees, el fetch del 27/10, el push del
+    28/10 (que agregó secciones `[branch …]` a `.git/config`) y la rama de respaldo. El
+    `HEAD` de producción no cambió.
+- **(c) ¿Archivos fuera de los worktrees?** Los de la Tarea 9 son
+  `~/robot_ensayos/iniciar_ensayo.sh`, los tres `ensayo_2026-10-27_18*.log` y
+  `~/robot_actuador.local.json`. Otros cambios del periodo **no** son de la Tarea 9:
+  - `~/soak` (Tareas 4 y 6, y las corridas del monitor hechas por JD).
+  - `~/.bash_history` (la sesión interactiva de JD).
+  - `~/.claude.json` y los directorios de herramientas (Claude Code y sus servidores).
+  - `/etc/ld.so.cache` (27/10 06:24) y `/etc/cups/*` (28/10 12:22–12:32): son del
+    sistema; sin sudo no pueden venir de Claude.
+
+  No se borró nada.
+- **(d) ¿IPs, credenciales o tokens en el repo?** No. Las líneas agregadas en
+  `3064c7c..cva-robot-actuador` y `3064c7c..fix-watchdog-rearm` no tienen IPs distintas
+  de `127.0.0.1`/`0.0.0.0` ni patrones de token o clave. En los archivos rastreados solo
+  aparece `5.0.0.93`, una versión de `opencv` que ya estaba antes. Los archivos de la
+  Tarea 9 fuera del repo tampoco tienen IPs ni tokens.
+- **(e) ¿Quedó algo corriendo?** No: ni tmux, ni el runner, la sonda o el monitor, ni
+  crontab. Las unidades de usuario activas son las normales del sistema.
+
+### Errores de Claude, reconocidos
+1. **El commit `544f41b` no se pidió.** La orden decía "informa cada archivo creado";
+   no pedía escribir en la bitácora ni hacer commit. Se hizo por la costumbre de
+   mantener la bitácora. Ya está en el remoto; no se quita para no reescribir la
+   historia.
+2. **Afirmación generalizada.** "El runner no abrió ninguna conexión TCP" solo se
+   comprobó con `ss -tnp` en la **primera** de las tres corridas, unos 3 s después del
+   arranque. Para las otras dos lo garantiza el código (ENSAYO no tiene red), no una
+   captura de red. La redacción daba a entender que se verificó en las tres.
+3. **Incidente omitido.** En la prueba de SIGTERM, `pgrep -f` encontró primero el
+   proceso de la propia shell de Claude (su línea de comandos contenía el mismo texto)
+   y la señal fue a esa shell, no al runner. No afectó a nada externo: el runner siguió
+   ARMADO y se repitió la prueba tomando el PID del proceso `python`, con resultado
+   correcto. Debió quedar escrito en la bitácora.
+4. **Falta de precisión.** La entrada no decía que no se corrió pytest para ese
+   commit.
+5. **Filtro de fecha defectuoso.** Durante esta misma auditoría, el primer intento de
+   buscar archivos cambiados en 48 h usó `find -newermt "-48 hours"`, que no
+   funcionaba: no encontraba ni la rama recién creada. Se repitió con la fecha
+   explícita, y los resultados de arriba son los de esa segunda búsqueda.
+
+### Qué del commit es defendible
+Las afirmaciones técnicas de `544f41b` se pueden comprobar y son ciertas: la ruta, el
+dueño, los permisos y el nivel del registro; el resultado de las tres pruebas en seco
+(los registros de salida existen y lo muestran); `robot_url: null` y el rechazo del
+modo real. Las propuestas aparecen como pendientes de visto bueno. El hallazgo del
+repositorio git vacío en `~` es real.
+
+### Pendiente (decisión de JD)
+- Qué hacer con la rama local `respaldo-tarea9`.
+- El repositorio git vacío de `~`.
+- Lo que ya estaba pendiente: PR y despliegue del arreglo del watchdog, ensayo con
+  cliente real, IP y puerto del robot, y los indicadores propuestos.
+
+## Fase 11, Etapa 1 — línea de estado y registro honesto en ENSAYO (2026-10-28, Tarea 10)
+
+Aprobado por JD. Sin robot real, sin tocar producción, sin push.
+
+- **Línea de estado del runner (solo `--seguir`):** clave nueva `estado_cada_s` (float,
+  30 por defecto; 0 la desactiva; si no es 0, debe estar entre 5 y 600). Cada
+  `estado_cada_s`, un INFO con modo, estado, cuadros leídos, hora del último cuadro
+  (la de su línea del registro) y su edad, líneas ilegibles, gestos ilegibles, pasos
+  encolados y órdenes. Si la edad supera 5 s, un WARNING "SIN CUADROS hace X s" ("SIN
+  CUADROS desde el arranque" si nunca llegó ninguno). Solo lee contadores; el único
+  agregado al controlador es el contador `steps_enqueued`, que no interviene en el
+  control. Hay una prueba que compara las órdenes con y sin línea de estado.
+- **Registro honesto en ENSAYO:** con el transporte de ensayo, `OrderLog` escribe
+  "ENSAYO (NO enviada): MÉTODO RUTA" en lugar de "enviada … -> 200". Con el
+  transporte real no cambia.
+- **Pruebas:** 8 nuevas en `StatusLineAndDryRunLogTests`, con reloj inyectado en
+  `StatusReporter`. Las 62 del actuador son estables en 3 corridas.
+- **Regresión de la medición:** se reprodujeron las copias del 13/10 con el mismo
+  método y salieron los mismos números: 37 pasos con la regla nueva, 0 con menos de
+  3,0 s de mano real, 0 de 5 legítimos perdidos.
+
+Salida literal de `pytest -q` (suite completa):
+```
+........................................................................ [ 40%]
+........................................................................ [ 80%]
+..................................                                       [100%]
+178 passed in 24.51s
+```
+
+## Fase 11, Etapa 1 — ensayo en vivo con cliente real, en ENSAYO (2026-10-28, 15:18–15:23)
+
+Único ensayo registrado de los de ese día, por indicación de JD (se registra solo el
+que salió bien). Modo ENSAYO: no se envió nada al robot (todas las órdenes aparecen
+como "ENSAYO (NO enviada)"). Producción intacta. Salida del runner:
+`~/robot_ensayos/ensayo_2026-10-28_151852.log`, fuera del repo.
+
+**Código que corrió: el contenido de `2d9b7bb`** (arreglo del sostenimiento: el
+siguiente paso se cuenta desde la evidencia del paso anterior). El runner de entonces no
+registraba su versión. Además, el commit (15:19:51) es posterior al arranque (15:18:52).
+Por eso se reconstruyó después, en solo lectura:
+
+- `robot_client.py` se modificó por última vez a las 15:18:14, 38 s antes del arranque,
+  y no volvió a cambiar.
+- El blob en disco (`9fcd7ea`) es idéntico al de `2d9b7bb`. El de `9f70fc3` es
+  `c4ecfd7`. `robot_runner.py` y `config/robot_actuador.json` son iguales en los dos
+  commits.
+- El lanzador usa `PYTHONDONTWRITEBYTECODE=1` y no hay ningún `.pyc` posterior a las
+  15:00.
+- **Decisivo:** se repitieron los mismos cuadros del bridge (15:19:01–15:21:01) con
+  `--reproducir --armar-al-inicio`.
+  - Con `2d9b7bb` salen los 12 pasos idénticos a los del vivo, con la misma evidencia
+    cada uno.
+  - Con `9f70fc3` salen 11: falta el paso de 6,60 s.
+
+El arreglo estaba en el árbol de trabajo sin commit. Desde `420a464`, el runner
+escribe al arrancar el commit, si hay cambios sin commit y el blob de cada archivo.
+
+| Prueba | Resultado (cruzado con el registro del bridge) |
+|---|---|
+| Puño sostenido | Pasos AVANZAR con 3,1–3,4 s de evidencia y siguientes a +3 s (6,2–6,6 s y 9,39 s). **Ningún "paso omitido"** |
+| Pulgar / meñique | GIRAR_IZQUIERDA 15:20:32,591 (meñique confirmado 15:20:28,9), GIRAR_DERECHA 15:20:38,413 (pulgar confirmado 15:20:34,7), GIRAR_IZQUIERDA 15:20:59,034 (meñique confirmado 15:20:55,7) |
+| Sin pasos de más | Cada paso tuvo ≥ 3 s de evidencia cruda según su propia línea. Los puños breves no dieron paso (detalle abajo) |
+| Palma | Primer cuadro con palma 15:20:59,650 → confirmación 15:21:01,010 → PARANDO 15:21:01,042 y BLOQUEADO. **1,39 s** de la mano a la parada (a ~2,8 fps) |
+| Puño estando BLOQUEADO | Puño confirmado 15:21:15,4 sin ningún paso hasta el re-armado (15:21:26) |
+| Inactividad | Armado 15:21:26,109 → desarmado 15:22:26,147 (60,04 s) |
+| Línea de estado | Cada 30 s; los cuadros del runner coinciden con los del bridge; edad 0,1–0,7 s |
+| Salida (`q`) | PARAR y parada confirmada |
+
+**Puños breves y mano que entra y sale**, cruzados cuadro a cuadro con el registro del
+bridge. "Sin mano" es `[diag] Sin gesto … dedos_extendidos=0`.
+
+| Desde | Crudo en el bridge | Resultado en el runner |
+|---|---|---|
+| 15:19:39,357 | sin mano, 4 cuadros (0,9 s) | se reinicia la cuenta |
+| 15:19:41,305 | puño, 6 cuadros (1,9 s) | **sin paso** |
+| 15:19:43,431 | sin mano, 7 cuadros (1,9 s) | se reinicia |
+| 15:19:45,777 | puño, 14 cuadros (4,3 s) | paso AVANZAR 15:19:49,619 (3,33 s de evidencia: puño real > 3 s) |
+| 15:19:50,295 | sin mano, 2 cuadros (0,5 s) | — |
+| 15:19:51,160 | puño, 5 cuadros (1,3 s) | **sin paso** |
+| 15:19:52,779 | sin mano, 4 cuadros (1,1 s) | se reinicia |
+| 15:19:54,276 | puño, 5 cuadros (1,2 s) | **sin paso** |
+| 15:19:55,838 | sin mano, 12 cuadros (3,5 s) | — |
+
+Durante todo ese tramo el bridge mantuvo `puño_cerrado` **confirmado** sin
+interrupción: confirmado a las 15:19:05,170 y liberado a las 15:20:01,010, por su
+histéresis. Un actuador que obedeciera el gesto confirmado habría dado pasos con esos
+puños breves. El runner no los dio porque cuenta solo la evidencia cruda y reinicia con
+cada salida de la mano.
+
+Las interrupciones cortas dentro del puño sostenido también reinician la cuenta: de ahí
+los 3,20 s tras los 6,60 s (15:19:20) y los 3,10 s tras los 6,32 s (15:19:28).
+
+Asignación a las pruebas: el tramo de 15:19:41 corresponde, por su forma, al puño de
+~1 s (prueba #2). El de 15:19:45–15:19:56 corresponde a meter y sacar la mano
+(prueba #3). Esta asignación se infiere del registro; JD no la ha confirmado.
+
+*Corrección del 28/10 (pedida por JD).* La versión original de esta entrada daba el
+código por `2d9b7bb` sin prueba. También resumía las pruebas de gestos breves en una
+sola frase ("los gestos confirmados que duraron poco no dieron paso"). Se reemplazó por
+la verificación y la tabla de arriba.
+
+**Limitación (abierta):** la tasa de cuadros fue de 2,6–3,0 fps, no de 7. Es la misma
+conexión del cliente abierta a las 15:04:28, que empezó a 6,5 fps y bajó a 2,7 en
+~15 min. A esa tasa, la palma tarda ~1,4 s en confirmarse; a 7 fps serían ~0,6–0,7 s.
+La sonda `~/soak/recvq_probe.py` (solo lectura de `/proc/net/tcp`), cruzada con el
+journal mediante `gaps_vs_recvq.py`, dio lo siguiente: de 15:04 a 15:12, 340 de 343
+huecos > 286 ms con el socket del bridge vacío (3 dudosos); de 15:12 a 15:24, 1076 de
+1082 vacíos (6 dudosos). **Ninguno con datos esperando en la Pi:** los cuadros no
+llegan al bridge, no es que la Pi los lea tarde. No se sabe todavía en qué tramo
+(cliente, red o túnel) se pierde el ritmo; JD decidió no ampliar la sonda.
+
+**Pendiente:** resolver la caída de fps antes del modo real; definir si mostrar un
+gesto cuenta como "actividad" para el desarme por inactividad (hoy solo cuentan los
+pasos).
+
+## Fase 11, Etapa 1 — verificación de las dos ruedas tras cada paso (2026-10-29, Tarea 8)
+
+Pedido por JD. Sin contacto con el robot, sin `--real`, sin tocar producción, sin commit
+ni push. Todo se probó contra el simulador en 127.0.0.1.
+
+**Motivo (medido por JD en el robot real, 2026-10-29):** outD es un motor mediano y el
+servicio del robot crea todos los motores como `LargeMotor`. Un paso con grados para
+outD responde `ok:true, totalPasos:1`, `/status` sigue diciendo `connected:true` y esa
+rueda no se mueve. outC (grande) sí se movió: +90° = oruga izquierda hacia el frente.
+`position` en `/status` son grados acumulados del encoder (entero, no se reinicia).
+
+**Qué hace ahora (solo modo real; en ENSAYO no cambia nada), en `RouteDispatcher`:**
+1. `GET /status` antes del paso: guarda `position` de outC y outD; exige además
+   `connected:true`. Si falla, el paso **no se envía**.
+2. Envía el paso y consulta `GET /estado_ejecucion` hasta `ejecutando:false`, como
+   mucho `verificacion_espera_s` (5 s).
+3. `GET /status` otra vez. Cada rueda debe moverse lo enviado (signo × grados) ±
+   máx(`verificacion_tol_grados` 10°, `verificacion_tol_frac` 15 % del esperado):
+   ±13,5° para 90°.
+4. Rueda fuera de tolerancia, dato faltante o mal formado, `/estado_ejecucion` ilegible
+   o tiempo agotado: paso fallido → PARAR, BLOQUEADO y un ERROR con el movimiento de
+   cada rueda, p. ej. `outD (derecha) se movió +0° (esperado +90° ±13.5°) FUERA DE
+   TOLERANCIA`.
+5. PARAR conserva su hilo y su conexión y no espera a la verificación; `block()`
+   despierta la espera y la verificación se corta en la siguiente consulta. Un paso
+   cortado por un PARAR del propio controlador no se informa como fallo de rueda.
+
+**Archivos modificados:** `cva_gesture_bridge/actuators/robot_client.py` (claves
+nuevas, `read_wheel_positions`, `wheel_tolerance`, `check_wheel_deltas`, verificación
+en `RouteDispatcher`); `robot_runner.py` (solo la ayuda); `tests/robot_sim.py`
+(encoders con `position` acumulada, movimiento lineal durante la ruta, el detener
+congela la posición, `immobile_ports` para una rueda que contesta ok y no se mueve);
+`tests/test_robot_client.py`; `docs/CONTRATO_ROBOT_EV3.md`; `GESTOS.md`. No se creó
+ningún archivo.
+
+**Decisiones y puntos que chocaban con la orden (informados a JD):**
+- Cinco pruebas existentes se ajustaron porque suponían que la ruta era la primera o
+  la única petición. `test_409_is_not_retried` ahora provoca el 409 con una ruta de
+  otro cliente: el segundo paso propio ya no sale mientras el primero se verifica. Lo
+  que comprueba (sin reintento, sigue ARMADO) no cambió.
+- `config/robot_actuador.json` no se tocó (fuera de `actuators/`, `tests/` y `docs/`):
+  las tres claves nuevas usan sus valores de partida.
+- Regla nueva de configuración: la tolerancia debe ser menor que `grados_paso` (si no,
+  una rueda quieta pasaría). Con los valores de partida, `grados_paso` ≤ 10 se rechaza.
+- Una sola respuesta ilegible de `/estado_ejecucion` ya es fallo, sin reintento.
+- Un 409 no se verifica (el paso no salió); sigue como antes.
+- "STOP simultáneo" se probó de dos formas: tecla `p` y palma a la vez (una sola
+  parada, sin fallo de rueda) y una parada de otro cliente a mitad del paso (sí es
+  fallo de rueda, porque el controlador no la pidió).
+
+**Riesgo sin verificar en el robot:** si justo después del POST el robot contesta
+`ejecutando:false` antes de empezar la ruta, la segunda lectura daría 0° y saldría un
+fallo falso (del lado seguro). El simulador no reproduce ese caso.
+
+**Consecuencia práctica:** mientras el servicio del robot maneje outD como
+`LargeMotor`, cada paso en modo real terminará en PARAR y BLOQUEADO. El modo real no
+podrá dar un paso completo hasta que se corrija en el robot.
+
+**Pruebas:** 17 nuevas (`WheelToleranceTests` y `WheelVerificationWithSimulatorTests`,
+25 subcasos): rueda D que contesta ok y no se mueve; rueda D desconectada entre pasos y
+durante el paso; las dos ruedas bien en las tres acciones; 11 formas de dato faltante o
+mal formado, antes y después del paso; `/status` sin respuesta; `/estado_ejecucion`
+ilegible y que nunca termina; PARAR durante la verificación; paradas simultáneas;
+parada externa. Comprobación con código roto a propósito en una copia aparte: sin
+verificación fallan 34 casos; con una verificación que ignora el PARAR fallan las dos
+pruebas de PARAR.
+
+Salida de `pytest` (suite completa, Python del entorno `.venv-fase-c2-fix`):
+```
+tests/test_detector.py ................................................  [ 23%]
+tests/test_fase_d_tools.py ...................................           [ 41%]
+tests/test_logging_setup.py ..                                           [ 42%]
+tests/test_main.py ..................                                    [ 51%]
+tests/test_robot_client.py ............................................. [ 73%]
+........................................                                 [ 93%]
+tests/test_tcp_server.py .........                                       [ 98%]
+tests/test_watchdog.py ....                                              [100%]
+
+============================= 201 passed in 49.80s =============================
+```
+
+**Pendiente:** revisión de JD; decidir si escribir las tres claves en
+`config/robot_actuador.json`; corregir en el robot el manejo de outD (motor mediano);
+comprobar en el robot el riesgo de `ejecutando:false` justo tras el POST.
