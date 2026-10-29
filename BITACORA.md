@@ -4250,3 +4250,103 @@ tests/test_watchdog.py ....                                              [100%]
 **Pendiente:** revisión de JD; decidir si escribir las tres claves en
 `config/robot_actuador.json`; corregir en el robot el manejo de outD (motor mediano);
 comprobar en el robot el riesgo de `ejecutando:false` justo tras el POST.
+
+## Fase 11, Etapa 0 — `main_cva.py`: copia acotada del servicio del robot (2026-10-29, Tarea 12)
+
+Pedido por JD, con las correcciones a los puntos 5 y 6 de la orden. Rama
+`robot-etapa0-herramientas`. Sin conexión con el robot; `main_cva.py` no se copió
+al robot. Solo archivos nuevos: ningún archivo existente ni el original cambió.
+
+**Base:** el `main.py` del robot, pegado por JD y guardado fuera del repo en
+`~/robot_base/main.py` (16 629 bytes, sha256
+`830c6e51b58fb8b55856608e541bb233e85869afe500039c2a1b28a3fd466c35`, comprobado antes
+de empezar).
+
+**Motivo (medido en el robot, 2026-10-29):** outD es un motor mediano. `main.py` lo
+crea como `LargeMotor`, falla, queda en `None` y `_ejecutar_pasos` lo ignora sin
+avisar: `ok:true` y la rueda D no se mueve. `/status` lo marca `connected:true`
+porque lo lee de sysfs.
+
+**Archivos creados:**
+
+| Archivo | Bytes | Qué es |
+|---|---|---|
+| `tools/robot_ev3/main_cva.py` | 20 417 | Servidor acotado, 534 líneas. sha256 `545b5439eb76aa9c81a5d08222d063c3f419e4032b3bcc1500729c8ca4aedf1f` |
+| `tools/robot_ev3/README.md` | 4 327 | Motivo, tabla de cambios frente a `main.py`, reglas de validación, uso, `scp` (sin ejecutar) |
+| `tests/test_main_cva.py` | 26 143 | 29 pruebas con un `ev3dev2` falso y un sysfs simulado |
+
+**Cambios frente a `main.py`:**
+1. outC se crea como `LargeMotor` y outD como `MediumMotor`; outA y outB quedan en
+   `None`.
+2. `/status` conserva el formato; en outC y outD, `connected` exige sysfs **y** que
+   el motor se haya creado. outA y outB siguen solo con sysfs.
+3. `/ejecutar_ruta` valida todo antes de mover nada; si algo falla, HTTP 400
+   `{"ok":false,"error":"..."}`:
+   - cuerpo JSON legible con `pasos`, una lista de 1 a 4;
+   - puertos outC/outD distintos (mismos formatos que `normalize_port`);
+   - grados enteros entre −180 y 180, al menos uno distinto de 0;
+   - potencia entera entre 1 y 30, 20 si falta (antes 40);
+   - pausa exactamente `{"pausaMs": n}`, con n de 0 a 5000;
+   - `motor no disponible: outX` si el motor es `None`.
+4. Arranque atómico con un lock; `ejecutando` queda en true antes del 200. El 409, el
+   `detener_ejecucion` y la lógica de `_mover_dos_motores` no cambian.
+5. Fuera `/move`, `GET /?cmd=` (incluido `killpid`), `get_motor_by_index` y
+   `apply_speed` (solo la usaba `/move`). **`POST /stop` se mantiene y ahora hace lo
+   mismo que `/detener_ejecucion`: cancela la ruta en curso** (el de `main.py` solo
+   apagaba motores y la ruta seguía); ignora el cuerpo. Cualquier otra ruta, 404.
+6. `--permitir IP` es obligatorio y repetible; 127.0.0.1 siempre se acepta. Otras IP
+   reciben 403 sin que se lea el cuerpo, y se cierra la conexión. Las IP no se
+   escriben en el registro (al arrancar solo se imprime cuántas hay). `--puerto` vale
+   8081 por defecto.
+
+**Decisiones para revisar:**
+- `/stop` responde `{"ok": true}`, sin la lista `stopped` de `main.py`.
+- Una ruta hecha solo de pausas se acepta (no mueve nada).
+- Las claves desconocidas en un paso de movimiento se ignoran, como en `main.py`.
+- `motorIzq` y `motorDer` tienen que ser texto.
+- SIGTERM (`timeout 1800`) no se captura: el paso en curso termina sus grados (como
+  mucho 180°) y los siguientes no arrancan.
+- Hay que cambiar a `:8081` el `robot_url` del actuador de la Pi5 y la URL de los
+  scripts de la Etapa 0.
+- Con `main_cva.py`, `ejecutando` ya está en true al responder el 200: se cierra el
+  riesgo anotado en la Tarea 8.
+
+**Pruebas:** motor mediano que sí se mueve; signos y potencia por defecto 20; formatos
+de puerto; formato de `/status`; motor D no creado (400 y `connected:false`); rutas
+vacías, sin `pasos` o ilegibles; 25 casos fuera de tope o de tipo incorrecto; topes
+válidos y pausas; 409; arranques simultáneos (por HTTP y llamando directamente a
+`iniciar_ejecucion` desde 16 hilos); parada por `/detener_ejecucion` y por `/stop`;
+rutas retiradas (404, sin `os.kill`); 403 para IP no permitidas sin leer el cuerpo;
+127.0.0.1 y varias IP permitidas; línea de comandos; arranque como programa sin
+imprimir las IP; sintaxis de Python 3.5.
+
+Comprobación con código roto a propósito en una copia aparte: seis versiones rotas
+(sin lock, outD como `LargeMotor`, `/stop` sin cancelar, `connected` solo por sysfs,
+con una f-string, sin filtro de IP) y cada una hace caer al menos una prueba. Dos
+hallazgos:
+- `ast.parse(..., feature_version=(3, 5))` no rechaza f-strings en Python 3.14: las
+  detecta la prueba que recorre el árbol.
+- La prueba de arranques simultáneos por HTTP no detecta la falta del lock; la de 16
+  hilos sí.
+
+La compatibilidad con 3.5 se comprueba sobre el código fuente, no ejecutándolo en
+3.5.
+
+Salida de `pytest` (suite completa, Python del entorno `.venv-fase-c2-fix`; las 12
+saltadas usan `tests/fixtures_real/`, que no está en esta copia):
+```
+tests/test_detector.py .................................ssssssssssss...  [ 20%]
+tests/test_fase_d_tools.py ...................................           [ 36%]
+tests/test_logging_setup.py ..                                           [ 36%]
+tests/test_main.py ..................                                    [ 44%]
+tests/test_main_cva.py .............................                     [ 57%]
+tests/test_robot_client.py ............................................. [ 76%]
+........................................                                 [ 94%]
+tests/test_tcp_server.py .........                                       [ 98%]
+tests/test_watchdog.py ....                                              [100%]
+
+======================= 218 passed, 12 skipped in 56.41s =======================
+```
+
+**Pendiente:** revisión de JD; decidir los puntos de arriba; copiar `main_cva.py` al
+robot (con `main.py` detenido) y probarlo con `ev3-paso.sh` y `ev3-prueba-parada.sh`.
